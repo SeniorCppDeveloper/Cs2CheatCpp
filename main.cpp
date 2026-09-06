@@ -145,7 +145,6 @@ bool WorldToScreen(Vector3 world, Vector3& screen, int screenWidth, int screenHe
     return true;
 }
 
-// ===== РИСОВАНИЕ =====
 void DrawFilledRect(int x, int y, int w, int h, int r, int g, int b, int a = 255) {
     HDC hdc = GetDC(overlayWnd);
     RECT rect = { x, y, x + w, y + h };
@@ -570,7 +569,7 @@ void RenderMenu() {
     int menuX = 50;
     int menuY = 50;
     int menuW = 350;
-    int menuH = 570; // чуть выше
+    int menuH = 570; 
     int itemY = 0;
     
     DrawFilledRect(menuX, menuY, menuW, menuH, 20, 20, 30, 230);
