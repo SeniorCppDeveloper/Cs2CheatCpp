@@ -24,7 +24,7 @@
 #define OFFSET_M_VEC_ORIGIN_IN_SCENENODE 0x80
 #define OFFSET_M_ISCOPEN 0x1C50
 #define OFFSET_M_ARMOR 0x1C7C
-#define OFFSET_M_VIEW_ANGLE 0x2580 // примерный оффсет для углов обзора
+#define OFFSET_M_VIEW_ANGLE 0x2580 
 
 HWND overlayWnd = NULL;
 HWND gameWnd = NULL;
