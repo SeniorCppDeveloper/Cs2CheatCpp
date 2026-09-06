@@ -24,6 +24,7 @@
 #define OFFSET_M_VEC_ORIGIN_IN_SCENENODE 0x80
 #define OFFSET_M_ISCOPEN 0x1C50
 #define OFFSET_M_ARMOR 0x1C7C
+#define OFFSET_M_VIEW_ANGLE 0x2580 // примерный оффсет для углов обзора
 
 HWND overlayWnd = NULL;
 HWND gameWnd = NULL;
@@ -45,11 +46,14 @@ struct Settings {
     bool headDot = true;
     bool glow = false;
     bool triggerbot = false;
+    bool silentAim = false; 
     bool radar = true;
     bool crosshair = false;
     int espColorMode = 0;
     float glowIntensity = 0.8f;
     int triggerDelay = 0;
+    int aimFov = 30;            
+    float aimSmoothness = 5.0f; 
 };
 
 Settings settings;
@@ -141,6 +145,7 @@ bool WorldToScreen(Vector3 world, Vector3& screen, int screenWidth, int screenHe
     return true;
 }
 
+// ===== РИСОВАНИЕ =====
 void DrawFilledRect(int x, int y, int w, int h, int r, int g, int b, int a = 255) {
     HDC hdc = GetDC(overlayWnd);
     RECT rect = { x, y, x + w, y + h };
@@ -286,6 +291,56 @@ void TriggerBot() {
     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
     Sleep(1);
     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+}
+
+void SilentAim() {
+    if (!settings.silentAim) return;
+    if (!(GetAsyncKeyState(VK_RBUTTON) & 0x8000)) return; 
+
+    uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
+    if (!localPawn) return;
+
+    Vector3 localPos = GetPlayerPos(localPawn);
+    int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
+
+    PlayerData* target = nullptr;
+    float closestFov = settings.aimFov;
+
+    for (auto& player : players) {
+        if (player.team == localTeam) continue;
+        if (player.health <= 0) continue;
+
+        Vector3 headPos = player.headPos;
+        Vector3 screenHead;
+        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
+        if (!WorldToScreen(headPos, screenHead, screenWidth, screenHeight)) continue;
+
+        float fov = sqrtf(pow(screenHead.x - screenWidth / 2, 2) + pow(screenHead.y - screenHeight / 2, 2));
+        if (fov < closestFov) {
+            closestFov = fov;
+            target = &player;
+        }
+    }
+
+    if (!target) return;
+
+    Vector3 delta = { target->headPos.x - localPos.x, target->headPos.y - localPos.y, target->headPos.z - localPos.z };
+    float distance = sqrtf(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+    if (distance < 1.0f) return;
+
+    float pitch = -asinf(delta.z / distance) * (180.0f / 3.14159265f);
+    float yaw = atan2f(delta.y, delta.x) * (180.0f / 3.14159265f);
+
+    Vector3 currentAngles = ReadMem<Vector3>(localPawn + OFFSET_M_VIEW_ANGLE); 
+
+    float smoothFactor = 1.0f / settings.aimSmoothness;
+    pitch = currentAngles.x + (pitch - currentAngles.x) * smoothFactor;
+    yaw = currentAngles.y + (yaw - currentAngles.y) * smoothFactor;
+
+    Vector3 newAngles = { pitch, yaw, 0 };
+    WriteMem(localPawn + OFFSET_M_VIEW_ANGLE, newAngles);
 }
 
 void UpdatePlayers() {
@@ -515,7 +570,7 @@ void RenderMenu() {
     int menuX = 50;
     int menuY = 50;
     int menuW = 350;
-    int menuH = 520;
+    int menuH = 570; // чуть выше
     int itemY = 0;
     
     DrawFilledRect(menuX, menuY, menuW, menuH, 20, 20, 30, 230);
@@ -583,17 +638,23 @@ void RenderMenu() {
     DrawText(menuX + 200, menuY + itemY, settings.triggerbot ? "ON" : "OFF", settings.triggerbot ? 0 : 255, settings.triggerbot ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F8) & 1) { settings.triggerbot = !settings.triggerbot; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F9 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Radar: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.radar ? "ON" : "OFF", settings.radar ? 0 : 255, settings.radar ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F9) & 1) { settings.radar = !settings.radar; Sleep(150); }
+    DrawText(menuX + 110, menuY + itemY, "Silent Aim: ", 255, 255, 255, 11);
+    DrawText(menuX + 210, menuY + itemY, settings.silentAim ? "ON" : "OFF", settings.silentAim ? 0 : 255, settings.silentAim ? 255 : 0, 0, 11);
+    if (GetAsyncKeyState(VK_F9) & 1) { settings.silentAim = !settings.silentAim; Sleep(150); }
     itemY += 25;
     
     DrawText(menuX + 15, menuY + itemY, "[ F10 ]", 200, 200, 200, 11);
+    DrawText(menuX + 110, menuY + itemY, "Radar: ", 255, 255, 255, 11);
+    DrawText(menuX + 200, menuY + itemY, settings.radar ? "ON" : "OFF", settings.radar ? 0 : 255, settings.radar ? 255 : 0, 0, 11);
+    if (GetAsyncKeyState(VK_F10) & 1) { settings.radar = !settings.radar; Sleep(150); }
+    itemY += 25;
+    
+    DrawText(menuX + 15, menuY + itemY, "[ F11 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Crosshair: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.crosshair ? "ON" : "OFF", settings.crosshair ? 0 : 255, settings.crosshair ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F10) & 1) { settings.crosshair = !settings.crosshair; Sleep(150); }
+    if (GetAsyncKeyState(VK_F11) & 1) { settings.crosshair = !settings.crosshair; Sleep(150); }
     itemY += 35;
     
     DrawLine(menuX + 10, menuY + itemY - 10, menuX + menuW - 10, menuY + itemY - 10, 50, 50, 70, 1);
@@ -613,6 +674,24 @@ void RenderMenu() {
     DrawText(menuX + 210, menuY + itemY, "[ - + ]", 150, 150, 150, 10);
     if (GetAsyncKeyState(VK_SUBTRACT) & 1) { settings.triggerDelay = max(0, settings.triggerDelay - 10); Sleep(150); }
     if (GetAsyncKeyState(VK_ADD) & 1) { settings.triggerDelay = min(200, settings.triggerDelay + 10); Sleep(150); }
+    itemY += 25;
+    
+    DrawText(menuX + 15, menuY + itemY, "Aim FOV:", 255, 255, 255, 11);
+    char fovText[16];
+    sprintf_s(fovText, "%d", settings.aimFov);
+    DrawText(menuX + 120, menuY + itemY, fovText, 0, 200, 255, 11);
+    DrawText(menuX + 180, menuY + itemY, "[ < > ]", 150, 150, 150, 10);
+    if (GetAsyncKeyState(VK_LEFT) & 1) { settings.aimFov = max(5, settings.aimFov - 5); Sleep(150); }
+    if (GetAsyncKeyState(VK_RIGHT) & 1) { settings.aimFov = min(180, settings.aimFov + 5); Sleep(150); }
+    itemY += 25;
+    
+    DrawText(menuX + 15, menuY + itemY, "Smoothness:", 255, 255, 255, 11);
+    char smoothText[16];
+    sprintf_s(smoothText, "%.1f", settings.aimSmoothness);
+    DrawText(menuX + 140, menuY + itemY, smoothText, 0, 200, 255, 11);
+    DrawText(menuX + 210, menuY + itemY, "[ - + ]", 150, 150, 150, 10);
+    if (GetAsyncKeyState(VK_SUBTRACT) & 1) { settings.aimSmoothness = max(1.0f, settings.aimSmoothness - 0.5f); Sleep(150); }
+    if (GetAsyncKeyState(VK_ADD) & 1) { settings.aimSmoothness = min(20.0f, settings.aimSmoothness + 0.5f); Sleep(150); }
     itemY += 30;
     
     DrawText(menuX + menuW / 2 - 80, menuY + menuH - 30, "NULLCORE v2.0 | by @nullcore", 100, 100, 150, 10);
@@ -688,7 +767,7 @@ int main() {
         UpdateOverlayPosition();
         ClearScreen();
         
-        if (settings.esp || settings.radar) {
+        if (settings.esp || settings.radar || settings.silentAim) {
             UpdatePlayers();
         }
         
@@ -698,6 +777,7 @@ int main() {
         RenderMenu();
         BunnyHop();
         TriggerBot();
+        SilentAim(); 
         
         Sleep(10);
     }
