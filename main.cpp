@@ -9,22 +9,25 @@
 
 #pragma comment(lib, "dwmapi.lib")
 
-#define OFFSET_DW_ENTITY_LIST 0x24E6590
-#define OFFSET_DW_VIEW_MATRIX 0x2345B30
-#define OFFSET_DW_LOCAL_PLAYER_PAWN 0x233FD78
-#define OFFSET_DW_LOCAL_PLAYER_CONTROLLER 0x23209E0
+#define OFFSET_DW_ENTITY_LIST             0x2546BC0
+#define OFFSET_DW_VIEW_MATRIX             0x2565A10
+#define OFFSET_DW_LOCAL_PLAYER_PAWN       0x2560698
+#define OFFSET_DW_LOCAL_PLAYER_CONTROLLER 0x2537A08
+#define OFFSET_DW_VIEW_ANGLES             0x25767D8
+#define OFFSET_DW_CSGO_INPUT              0x2576150
+#define OFFSET_DW_GLOBAL_VARS             0x222BED8
 
-#define OFFSET_M_HEALTH 0x34C
-#define OFFSET_M_LIFESTATE 0x354
-#define OFFSET_M_TEAM 0x3EB
-#define OFFSET_M_FLAGS 0x3F8
-#define OFFSET_M_VEC_VELOCITY 0x430
-#define OFFSET_M_H_PLAYER_PAWN 0x90C
-#define OFFSET_M_PGAMESCENENODE 0x330
-#define OFFSET_M_VEC_ORIGIN_IN_SCENENODE 0x80
-#define OFFSET_M_ISCOPEN 0x1C50
-#define OFFSET_M_ARMOR 0x1C7C
-#define OFFSET_M_VIEW_ANGLE 0x2580 
+#define OFFSET_M_HEALTH                   0x34C
+#define OFFSET_M_LIFESTATE                0x354
+#define OFFSET_M_TEAM                     0x3E7
+#define OFFSET_M_FLAGS                    0x3F4
+#define OFFSET_M_VEC_VELOCITY             0x430
+#define OFFSET_M_H_PLAYER_PAWN            0x92C
+#define OFFSET_M_PGAMESCENENODE           0x330
+#define OFFSET_M_VEC_ORIGIN_IN_SCENENODE  0x80
+#define OFFSET_M_ISCOPEN                  0x1EA0
+#define OFFSET_M_ARMOR                    0x1ECC
+#define OFFSET_M_VIEW_ANGLE               0x2580
 
 HWND overlayWnd = NULL;
 HWND gameWnd = NULL;
@@ -46,21 +49,21 @@ struct Settings {
     bool headDot = true;
     bool glow = false;
     bool triggerbot = false;
-    bool silentAim = false; 
+    bool silentAim = false;
     bool radar = true;
     bool crosshair = false;
     int espColorMode = 0;
     float glowIntensity = 0.8f;
     int triggerDelay = 0;
-    int aimFov = 30;            
-    float aimSmoothness = 5.0f; 
+    int aimFov = 30;
+    float aimSmoothness = 5.0f;
 };
 
 Settings settings;
 
 struct Vector3 {
     float x, y, z;
-    
+
     float DistTo(const Vector3& other) const {
         return sqrtf((other.x - x) * (other.x - x) +
             (other.y - y) * (other.y - y) +
@@ -100,7 +103,14 @@ uintptr_t GetModuleBase(DWORD pid, const wchar_t* module) {
     MODULEENTRY32W me = { sizeof(me) };
     uintptr_t base = 0;
     if (Module32FirstW(snapshot, &me)) {
-        do { if (_wcsicmp(me.szModule, module) == 0) { base = (uintptr_t)me.modBaseAddr; break; } } while (Module32NextW(snapshot, &me));
+        do {
+            if (_wcsicmp(me.szModule, module) == 0) {
+                base = (uintptr_t)me.modBaseAddr;
+                printf("[MOD] %S base=0x%llX size=0x%X (%.1f MB)\n",
+                    me.szModule, base, me.modBaseSize, me.modBaseSize / 1048576.0f);
+                break;
+            }
+        } while (Module32NextW(snapshot, &me));
     }
     CloseHandle(snapshot);
     return base;
@@ -134,14 +144,14 @@ Vector3 GetPlayerPos(uintptr_t pawn) {
 bool WorldToScreen(Vector3 world, Vector3& screen, int screenWidth, int screenHeight) {
     float w = viewMatrix[12] * world.x + viewMatrix[13] * world.y + viewMatrix[14] * world.z + viewMatrix[15];
     if (w < 0.01f) return false;
-    
+
     float invW = 1.0f / w;
     screen.x = (viewMatrix[0] * world.x + viewMatrix[1] * world.y + viewMatrix[2] * world.z + viewMatrix[3]) * invW;
     screen.y = (viewMatrix[4] * world.x + viewMatrix[5] * world.y + viewMatrix[6] * world.z + viewMatrix[7]) * invW;
-    
+
     screen.x = (screenWidth / 2) + (screen.x * screenWidth / 2);
     screen.y = (screenHeight / 2) - (screen.y * screenHeight / 2);
-    
+
     return true;
 }
 
@@ -233,13 +243,13 @@ void UpdateOverlayPosition() {
 
 void BunnyHop() {
     if (!settings.bhop) return;
-    
+
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
-    
+
     int flags = ReadMem<int>(localPawn + OFFSET_M_FLAGS);
     bool isOnGround = (flags & 1) != 0;
-    
+
     if ((GetAsyncKeyState(VK_SPACE) & 0x8000) && isOnGround) {
         INPUT input = { 0 };
         input.type = INPUT_KEYBOARD;
@@ -253,40 +263,40 @@ void BunnyHop() {
 void TriggerBot() {
     if (!settings.triggerbot) return;
     if (!(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return;
-    
+
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
-    
+
     int crosshairId = ReadMem<int>(localPawn + 0x33FC);
     if (crosshairId <= 0 || crosshairId > 64) return;
-    
+
     uintptr_t entityList = ReadMem<uintptr_t>(clientBase + OFFSET_DW_ENTITY_LIST);
     if (!entityList) return;
-    
+
     uintptr_t listEntry = ReadMem<uintptr_t>(entityList + (8 * (crosshairId & 0x7FFF) >> 9) + 16);
     if (!listEntry) return;
-    
+
     uintptr_t playerController = ReadMem<uintptr_t>(listEntry + 120 * (crosshairId & 0x1FF));
     if (!playerController) return;
-    
+
     uint32_t pawnHandle = ReadMem<uint32_t>(playerController + OFFSET_M_H_PLAYER_PAWN);
     if (!pawnHandle) return;
-    
+
     uintptr_t listEntry2 = ReadMem<uintptr_t>(entityList + (8 * ((pawnHandle & 0x7FFF) >> 9) + 16));
     if (!listEntry2) return;
-    
+
     uintptr_t pawn = ReadMem<uintptr_t>(listEntry2 + 120 * (pawnHandle & 0x1FF));
     if (!pawn) return;
-    
+
     int health = ReadMem<int>(pawn + OFFSET_M_HEALTH);
     if (health <= 0) return;
-    
+
     int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
     int targetTeam = ReadMem<int>(pawn + OFFSET_M_TEAM);
     if (targetTeam == localTeam) return;
-    
+
     if (settings.triggerDelay > 0) Sleep(settings.triggerDelay);
-    
+
     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
     Sleep(1);
     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
@@ -294,7 +304,7 @@ void TriggerBot() {
 
 void SilentAim() {
     if (!settings.silentAim) return;
-    if (!(GetAsyncKeyState(VK_RBUTTON) & 0x8000)) return; 
+    if (!(GetAsyncKeyState(VK_RBUTTON) & 0x8000)) return;
 
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
@@ -305,14 +315,15 @@ void SilentAim() {
     PlayerData* target = nullptr;
     float closestFov = settings.aimFov;
 
+    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+
     for (auto& player : players) {
         if (player.team == localTeam) continue;
         if (player.health <= 0) continue;
 
         Vector3 headPos = player.headPos;
         Vector3 screenHead;
-        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
         if (!WorldToScreen(headPos, screenHead, screenWidth, screenHeight)) continue;
 
@@ -332,52 +343,81 @@ void SilentAim() {
     float pitch = -asinf(delta.z / distance) * (180.0f / 3.14159265f);
     float yaw = atan2f(delta.y, delta.x) * (180.0f / 3.14159265f);
 
-    Vector3 currentAngles = ReadMem<Vector3>(localPawn + OFFSET_M_VIEW_ANGLE); 
+    Vector3 currentAngles = ReadMem<Vector3>(clientBase + OFFSET_DW_VIEW_ANGLES);
 
     float smoothFactor = 1.0f / settings.aimSmoothness;
     pitch = currentAngles.x + (pitch - currentAngles.x) * smoothFactor;
     yaw = currentAngles.y + (yaw - currentAngles.y) * smoothFactor;
 
     Vector3 newAngles = { pitch, yaw, 0 };
-    WriteMem(localPawn + OFFSET_M_VIEW_ANGLE, newAngles);
+
+    WriteMem(clientBase + OFFSET_DW_VIEW_ANGLES, newAngles);
 }
 
 void UpdatePlayers() {
     players.clear();
-    
+
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
+    printf("[DBG] localPawn = 0x%llX\n", localPawn);
     if (!localPawn) return;
-    
+
     int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
+    int localHealth = ReadMem<int>(localPawn + OFFSET_M_HEALTH);
     Vector3 localPos = GetPlayerPos(localPawn);
-    
+    printf("[DBG] localTeam = %d, localHP = %d, localPos = (%.1f, %.1f, %.1f)\n",
+        localTeam, localHealth, localPos.x, localPos.y, localPos.z);
+
     uintptr_t entityList = ReadMem<uintptr_t>(clientBase + OFFSET_DW_ENTITY_LIST);
+    printf("[DBG] entityList = 0x%llX\n", entityList);
     if (!entityList) return;
-    
+
     for (int i = 1; i <= 64; i++) {
         uintptr_t listEntry = ReadMem<uintptr_t>(entityList + (8 * (i & 0x7FFF) >> 9) + 16);
-        if (!listEntry) continue;
-        
+        if (!listEntry) {
+            if (i <= 10) printf("[DBG] i=%d: listEntry = 0\n", i);
+            continue;
+        }
+
         uintptr_t playerController = ReadMem<uintptr_t>(listEntry + 120 * (i & 0x1FF));
-        if (!playerController) continue;
-        
+        if (!playerController) {
+            if (i <= 10) printf("[DBG] i=%d: controller = 0 (listEntry=0x%llX)\n", i, listEntry);
+            continue;
+        }
+
         uint32_t pawnHandle = ReadMem<uint32_t>(playerController + OFFSET_M_H_PLAYER_PAWN);
-        if (!pawnHandle || pawnHandle == -1) continue;
-        
+        if (!pawnHandle || pawnHandle == -1) {
+            if (i <= 10) printf("[DBG] i=%d: pawnHandle = 0x%X (controller=0x%llX)\n", i, pawnHandle, playerController);
+            continue;
+        }
+
         uintptr_t listEntry2 = ReadMem<uintptr_t>(entityList + (8 * ((pawnHandle & 0x7FFF) >> 9) + 16));
-        if (!listEntry2) continue;
-        
+        if (!listEntry2) {
+            if (i <= 10) printf("[DBG] i=%d: listEntry2 = 0 (handle=0x%X)\n", i, pawnHandle);
+            continue;
+        }
+
         uintptr_t pawn = ReadMem<uintptr_t>(listEntry2 + 120 * (pawnHandle & 0x1FF));
-        if (!pawn || pawn == localPawn) continue;
-        
+        if (!pawn || pawn == localPawn) {
+            if (i <= 10) printf("[DBG] i=%d: pawn = 0x%llX (localPawn=0x%llX)\n", i, pawn, localPawn);
+            continue;
+        }
+
         int lifeState = ReadMem<int>(pawn + OFFSET_M_LIFESTATE);
-        if (lifeState != 256) continue;
-        
+        if (lifeState != 256) {
+            if (i <= 10) printf("[DBG] i=%d: lifeState = %d (pawn=0x%llX)\n", i, lifeState, pawn);
+            continue;
+        }
+
         int health = ReadMem<int>(pawn + OFFSET_M_HEALTH);
-        if (health <= 0 || health > 100) continue;
-        
+        if (health <= 0 || health > 100) {
+            if (i <= 10) printf("[DBG] i=%d: health = %d (pawn=0x%llX)\n", i, health, pawn);
+            continue;
+        }
+
         int team = ReadMem<int>(pawn + OFFSET_M_TEAM);
-        
+
+        printf("[DBG] i=%d: VALID player pawn=0x%llX HP=%d team=%d\n", i, pawn, health, team);
+
         PlayerData player;
         player.controller = playerController;
         player.pawn = pawn;
@@ -389,110 +429,113 @@ void UpdatePlayers() {
         player.team = team;
         player.alive = true;
         player.distance = localPos.DistTo(player.position);
-        
+
         ReadProcessMemory(gameProcess, (LPCVOID)(playerController + 0x6F4), player.name, sizeof(player.name), NULL);
-        
+
         players.push_back(player);
     }
-    
+
+    printf("[DBG] total players found: %d\n\n", (int)players.size());
+
     std::sort(players.begin(), players.end(), [](const PlayerData& a, const PlayerData& b) {
         return a.distance < b.distance;
-    });
+        });
 }
 
 void RenderESP() {
     if (!settings.esp) return;
-    
+
+    printf("[ESP] players.size() = %d\n", (int)players.size());
+
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-    
+
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
-    
+
     int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
-    Vector3 localPos = GetPlayerPos(localPawn);
-    
+
     UpdateViewMatrix();
-    
+
     char localInfo[128];
     sprintf_s(localInfo, "[NULLCORE] HP: %d | ARMOR: %d | ENEMIES: %d",
         ReadMem<int>(localPawn + OFFSET_M_HEALTH),
         ReadMem<int>(localPawn + OFFSET_M_ARMOR),
         (int)players.size());
     DrawText(10, 10, localInfo, 0, 255, 0, 11);
-    
+
     for (const auto& player : players) {
         bool isEnemy = (player.team != localTeam);
-        
+
         int r = isEnemy ? 255 : 100;
         int g = isEnemy ? 0 : 255;
         int b = isEnemy ? 0 : 100;
-        
+
         switch (settings.espColorMode) {
-            case 1: r = 255; g = 255; b = 255; break;
-            case 2: r = 0; g = 255; b = 255; break;
-            case 3: r = 255; g = 0; b = 255; break;
-            case 4: r = 255; g = 255; b = 0; break;
-            default: break;
+        case 1: r = 255; g = 255; b = 255; break;
+        case 2: r = 0; g = 255; b = 255; break;
+        case 3: r = 255; g = 0; b = 255; break;
+        case 4: r = 255; g = 255; b = 0; break;
+        default: break;
         }
-        
+
         Vector3 screenPos, screenHead;
         if (!WorldToScreen(player.position, screenPos, screenWidth, screenHeight)) continue;
         if (!WorldToScreen(player.headPos, screenHead, screenWidth, screenHeight)) continue;
-        
+
         float boxHeight = fabs(screenPos.y - screenHead.y);
         float boxWidth = boxHeight / 1.8f;
         if (boxHeight < 20) boxHeight = 20;
         if (boxHeight > 200) boxHeight = 200;
         if (boxWidth < 12) boxWidth = 12;
-        
+
         int boxX = (int)(screenPos.x - boxWidth / 2);
         int boxY = (int)(screenHead.y);
         int boxW = (int)boxWidth;
         int boxH = (int)boxHeight;
-        
+
         if (settings.box) {
             DrawRect(boxX, boxY, boxW, boxH, r, g, b, 2);
             DrawRect(boxX - 1, boxY - 1, boxW + 2, boxH + 2, 0, 0, 0, 1);
         }
-        
+
         if (settings.health) {
             DrawHealthBar(boxX + boxW, boxY, boxW, boxH, player.health);
         }
-        
+
         if (settings.armor && player.armor > 0) {
             DrawArmorBar(boxX + boxW, boxY, boxW, boxH, player.armor);
         }
-        
+
         if (settings.snaplines) {
             DrawLine(screenWidth / 2, screenHeight, (int)screenPos.x, (int)screenPos.y, r, g, b, 1);
         }
-        
+
         if (settings.headDot) {
             DrawCircle((int)screenHead.x, (int)screenHead.y, 3, r, g, b);
         }
-        
+
         if (settings.line) {
             DrawLine((int)screenPos.x, (int)screenPos.y, (int)screenPos.x, screenHeight, r, g, b, 1);
         }
-        
+
         int textY = boxY - 18;
-        
+
         if (settings.name && player.name[0]) {
             DrawText(boxX, textY, player.name, 255, 255, 255, 10);
             textY -= 14;
         }
-        
+
         if (settings.distance) {
             char distText[32];
             sprintf_s(distText, "%.0fm", player.distance);
             DrawText(boxX + boxW / 2 - 20, boxY + boxH + 2, distText, 255, 255, 255, 10);
         }
-        
+
         char hpText[16];
         sprintf_s(hpText, "%d", player.health);
         DrawText(boxX + boxW + 8, boxY + boxH - 15, hpText, r, g, b, 11);
-        
+
         char colorChar[2] = { (char)(player.team == 2 ? 'T' : (player.team == 3 ? 'C' : '?')), 0 };
         DrawText(boxX - 15, boxY + boxH - 15, colorChar, r, g, b, 10);
     }
@@ -500,12 +543,12 @@ void RenderESP() {
 
 void DrawCrosshair() {
     if (!settings.crosshair) return;
-    
+
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
     int cx = screenWidth / 2;
     int cy = screenHeight / 2;
-    
+
     DrawLine(cx - 10, cy, cx + 10, cy, 0, 255, 0, 1);
     DrawLine(cx, cy - 10, cx, cy + 10, 0, 255, 0, 1);
     DrawCircle(cx, cy, 4, 0, 255, 0);
@@ -513,40 +556,40 @@ void DrawCrosshair() {
 
 void DrawRadar() {
     if (!settings.radar) return;
-    
+
     int radarX = GetSystemMetrics(SM_CXSCREEN) - 210;
     int radarY = 10;
     int radarSize = 200;
-    
+
     DrawFilledRect(radarX, radarY, radarSize, radarSize, 0, 0, 0, 180);
     DrawRect(radarX, radarY, radarSize, radarSize, 50, 50, 50, 1);
-    
+
     DrawLine(radarX + radarSize / 2, radarY, radarX + radarSize / 2, radarY + radarSize, 255, 255, 255, 1);
     DrawLine(radarX, radarY + radarSize / 2, radarX + radarSize, radarY + radarSize / 2, 255, 255, 255, 1);
-    
+
     DrawCircle(radarX + radarSize / 2, radarY + radarSize / 2, 5, 0, 255, 0);
-    
+
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
-    
+
     Vector3 localPos = GetPlayerPos(localPawn);
     int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
-    
+
     for (const auto& player : players) {
         if (player.team == localTeam) continue;
-        
+
         float dx = player.position.x - localPos.x;
         float dy = player.position.y - localPos.y;
         float distance = sqrtf(dx * dx + dy * dy);
         if (distance > 1500) continue;
-        
+
         float rad = atan2(dy, dx);
         float nx = cos(rad) * (distance / 1500.0f) * (radarSize / 2);
         float ny = sin(rad) * (distance / 1500.0f) * (radarSize / 2);
-        
+
         int px = (int)(radarX + radarSize / 2 + nx);
         int py = (int)(radarY + radarSize / 2 + ny);
-        
+
         if (px >= radarX && px <= radarX + radarSize && py >= radarY && py <= radarY + radarSize) {
             DrawFilledRect(px - 2, py - 2, 4, 4, 255, 0, 0);
         }
@@ -558,80 +601,80 @@ void RenderMenu() {
         menuOpen = !menuOpen;
         Sleep(150);
     }
-    
+
     if (GetAsyncKeyState(VK_END) & 1) {
         running = false;
         Sleep(150);
     }
-    
+
     if (!menuOpen) return;
-    
+
     int menuX = 50;
     int menuY = 50;
     int menuW = 350;
-    int menuH = 570; 
+    int menuH = 570;
     int itemY = 0;
-    
+
     DrawFilledRect(menuX, menuY, menuW, menuH, 20, 20, 30, 230);
     DrawRect(menuX, menuY, menuW, menuH, 0, 150, 255, 2);
-    
+
     DrawText(menuX + menuW / 2 - 70, menuY + 10, "NULLCORE CS2 CHEAT", 0, 200, 255, 14);
     DrawLine(menuX + 10, menuY + 35, menuX + menuW - 10, menuY + 35, 0, 150, 255, 1);
-    
+
     itemY = 55;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ INSERT ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Show/Hide Menu", 255, 255, 255, 11);
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ END ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Exit Cheat", 255, 255, 255, 11);
     itemY += 35;
-    
+
     DrawLine(menuX + 10, menuY + itemY - 10, menuX + menuW - 10, menuY + itemY - 10, 50, 50, 70, 1);
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F1 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "ESP: ", 255, 255, 255, 11);
     DrawText(menuX + 180, menuY + itemY, settings.esp ? "ON" : "OFF", settings.esp ? 0 : 255, settings.esp ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F1) & 1) { settings.esp = !settings.esp; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F2 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "BunnyHop: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.bhop ? "ON" : "OFF", settings.bhop ? 0 : 255, settings.bhop ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F2) & 1) { settings.bhop = !settings.bhop; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F3 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Box ESP: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.box ? "ON" : "OFF", settings.box ? 0 : 255, settings.box ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F3) & 1) { settings.box = !settings.box; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F4 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Snaplines: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.snaplines ? "ON" : "OFF", settings.snaplines ? 0 : 255, settings.snaplines ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F4) & 1) { settings.snaplines = !settings.snaplines; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F5 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Health ESP: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.health ? "ON" : "OFF", settings.health ? 0 : 255, settings.health ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F5) & 1) { settings.health = !settings.health; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F6 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Armor ESP: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.armor ? "ON" : "OFF", settings.armor ? 0 : 255, settings.armor ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F6) & 1) { settings.armor = !settings.armor; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F7 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Distance: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.distance ? "ON" : "OFF", settings.distance ? 0 : 255, settings.distance ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F7) & 1) { settings.distance = !settings.distance; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F8 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "TriggerBot: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.triggerbot ? "ON" : "OFF", settings.triggerbot ? 0 : 255, settings.triggerbot ? 255 : 0, 0, 11);
@@ -643,21 +686,21 @@ void RenderMenu() {
     DrawText(menuX + 210, menuY + itemY, settings.silentAim ? "ON" : "OFF", settings.silentAim ? 0 : 255, settings.silentAim ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F9) & 1) { settings.silentAim = !settings.silentAim; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F10 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Radar: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.radar ? "ON" : "OFF", settings.radar ? 0 : 255, settings.radar ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F10) & 1) { settings.radar = !settings.radar; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "[ F11 ]", 200, 200, 200, 11);
     DrawText(menuX + 110, menuY + itemY, "Crosshair: ", 255, 255, 255, 11);
     DrawText(menuX + 200, menuY + itemY, settings.crosshair ? "ON" : "OFF", settings.crosshair ? 0 : 255, settings.crosshair ? 255 : 0, 0, 11);
     if (GetAsyncKeyState(VK_F11) & 1) { settings.crosshair = !settings.crosshair; Sleep(150); }
     itemY += 35;
-    
+
     DrawLine(menuX + 10, menuY + itemY - 10, menuX + menuW - 10, menuY + itemY - 10, 50, 50, 70, 1);
-    
+
     DrawText(menuX + 15, menuY + itemY, "ESP Color:", 255, 255, 255, 11);
     const char* colorModes[] = { "Team", "White", "Cyan", "Pink", "Yellow" };
     DrawText(menuX + 120, menuY + itemY, colorModes[settings.espColorMode], 0, 200, 255, 11);
@@ -665,7 +708,7 @@ void RenderMenu() {
     if (GetAsyncKeyState(VK_LEFT) & 1) { settings.espColorMode = (settings.espColorMode + 4) % 5; Sleep(150); }
     if (GetAsyncKeyState(VK_RIGHT) & 1) { settings.espColorMode = (settings.espColorMode + 1) % 5; Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "Trigger Delay:", 255, 255, 255, 11);
     char delayText[16];
     sprintf_s(delayText, "%dms", settings.triggerDelay);
@@ -674,7 +717,7 @@ void RenderMenu() {
     if (GetAsyncKeyState(VK_SUBTRACT) & 1) { settings.triggerDelay = max(0, settings.triggerDelay - 10); Sleep(150); }
     if (GetAsyncKeyState(VK_ADD) & 1) { settings.triggerDelay = min(200, settings.triggerDelay + 10); Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "Aim FOV:", 255, 255, 255, 11);
     char fovText[16];
     sprintf_s(fovText, "%d", settings.aimFov);
@@ -683,7 +726,7 @@ void RenderMenu() {
     if (GetAsyncKeyState(VK_LEFT) & 1) { settings.aimFov = max(5, settings.aimFov - 5); Sleep(150); }
     if (GetAsyncKeyState(VK_RIGHT) & 1) { settings.aimFov = min(180, settings.aimFov + 5); Sleep(150); }
     itemY += 25;
-    
+
     DrawText(menuX + 15, menuY + itemY, "Smoothness:", 255, 255, 255, 11);
     char smoothText[16];
     sprintf_s(smoothText, "%.1f", settings.aimSmoothness);
@@ -692,7 +735,7 @@ void RenderMenu() {
     if (GetAsyncKeyState(VK_SUBTRACT) & 1) { settings.aimSmoothness = max(1.0f, settings.aimSmoothness - 0.5f); Sleep(150); }
     if (GetAsyncKeyState(VK_ADD) & 1) { settings.aimSmoothness = min(20.0f, settings.aimSmoothness + 0.5f); Sleep(150); }
     itemY += 30;
-    
+
     DrawText(menuX + menuW / 2 - 80, menuY + menuH - 30, "NULLCORE v2.0 | by @nullcore", 100, 100, 150, 10);
 }
 
@@ -715,13 +758,13 @@ HWND CreateOverlay() {
     wc.hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
     wc.lpszClassName = L"NULLCORE_OVERLAY";
     RegisterClassExW(&wc);
-    
+
     HWND hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE,
+        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         L"NULLCORE_OVERLAY", L"NULLCORE", WS_POPUP,
         0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
         NULL, NULL, wc.hInstance, NULL);
-    
+
     SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
     MARGINS margins = { -1 };
     DwmExtendFrameIntoClientArea(hwnd, &margins);
@@ -734,53 +777,55 @@ int main() {
     FILE* f;
     freopen_s(&f, "CONOUT$", "w", stdout);
     printf("[NULLCORE] Starting...\n");
-    
+
     MessageBoxW(NULL, L"Click OK when CS2 is running", L"NULLCORE", MB_OK);
-    
+
     DWORD pid = GetProcessId(L"cs2.exe");
     if (!pid) {
         MessageBoxW(NULL, L"CS2 NOT FOUND!", L"ERROR", MB_OK);
         return 1;
     }
-    
+
     gameProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!gameProcess) {
         MessageBoxW(NULL, L"Run as Administrator!", L"ERROR", MB_OK);
         return 1;
     }
-    
+
     clientBase = GetModuleBase(pid, L"client.dll");
     gameWnd = FindWindowW(NULL, L"Counter-Strike 2");
     overlayWnd = CreateOverlay();
-    
+
     printf("[NULLCORE] CS2 PID: %d\n", pid);
     printf("[NULLCORE] client.dll: 0x%llX\n", clientBase);
-    
+    printf("[NULLCORE] gameWnd: 0x%llX\n", (uintptr_t)gameWnd);
+    printf("[NULLCORE] overlayWnd: 0x%llX\n", (uintptr_t)overlayWnd);
+
     MSG msg;
     while (running) {
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-        
+
         UpdateOverlayPosition();
         ClearScreen();
-        
+
         if (settings.esp || settings.radar || settings.silentAim) {
             UpdatePlayers();
         }
-        
+
         RenderESP();
         DrawRadar();
         DrawCrosshair();
         RenderMenu();
         BunnyHop();
         TriggerBot();
-        SilentAim(); 
-        
+        SilentAim();
+
         Sleep(10);
     }
-    
+
     FreeConsole();
     CloseHandle(gameProcess);
     printf("[NULLCORE] Shutdown\n");
