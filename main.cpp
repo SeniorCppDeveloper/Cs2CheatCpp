@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include <windowsx.h>
 #include <TlHelp32.h>
 #include <dwmapi.h>
 #include <cstdio>
@@ -35,6 +36,23 @@ HANDLE gameProcess = NULL;
 uintptr_t clientBase = 0;
 bool running = true;
 bool menuOpen = false;
+
+const int MENU_X = 60;
+const int MENU_Y = 60;
+const int MENU_W = 380;
+const int MENU_H = 620;
+
+struct MenuItem {
+    RECT rect;
+    int id;
+};
+
+std::vector<MenuItem> menuItems;
+
+HDC memDC = NULL;
+HBITMAP memBitmap = NULL;
+HBITMAP oldBitmap = NULL;
+int screenW = 0, screenH = 0;
 
 struct Settings {
     bool esp = true;
@@ -106,8 +124,6 @@ uintptr_t GetModuleBase(DWORD pid, const wchar_t* module) {
         do {
             if (_wcsicmp(me.szModule, module) == 0) {
                 base = (uintptr_t)me.modBaseAddr;
-                printf("[MOD] %S base=0x%llX size=0x%X (%.1f MB)\n",
-                    me.szModule, base, me.modBaseSize, me.modBaseSize / 1048576.0f);
                 break;
             }
         } while (Module32NextW(snapshot, &me));
@@ -155,58 +171,88 @@ bool WorldToScreen(Vector3 world, Vector3& screen, int screenWidth, int screenHe
     return true;
 }
 
-void DrawFilledRect(int x, int y, int w, int h, int r, int g, int b, int a = 255) {
+void InitBackBuffer() {
+    screenW = GetSystemMetrics(SM_CXSCREEN);
+    screenH = GetSystemMetrics(SM_CYSCREEN);
+
     HDC hdc = GetDC(overlayWnd);
+    memDC = CreateCompatibleDC(hdc);
+    memBitmap = CreateCompatibleBitmap(hdc, screenW, screenH);
+    oldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
+    ReleaseDC(overlayWnd, hdc);
+}
+
+void ShutdownBackBuffer() {
+    if (memDC) {
+        SelectObject(memDC, oldBitmap);
+        DeleteObject(memBitmap);
+        DeleteDC(memDC);
+        memDC = NULL;
+    }
+}
+
+void ClearScreen() {
+    RECT full = { 0, 0, screenW, screenH };
+    HBRUSH brush = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(memDC, &full, brush);
+    DeleteObject(brush);
+}
+
+void Present() {
+    HDC hdc = GetDC(overlayWnd);
+    BitBlt(hdc, 0, 0, screenW, screenH, memDC, 0, 0, SRCCOPY);
+    ReleaseDC(overlayWnd, hdc);
+}
+
+void DrawFilledRect(int x, int y, int w, int h, int r, int g, int b, int a = 255) {
     RECT rect = { x, y, x + w, y + h };
     HBRUSH brush = CreateSolidBrush(RGB(r, g, b));
-    SetBkMode(hdc, TRANSPARENT);
-    FillRect(hdc, &rect, brush);
+    FillRect(memDC, &rect, brush);
     DeleteObject(brush);
-    ReleaseDC(overlayWnd, hdc);
 }
 
 void DrawRect(int x, int y, int w, int h, int r, int g, int b, int thickness = 2) {
-    HDC hdc = GetDC(overlayWnd);
     HPEN pen = CreatePen(PS_SOLID, thickness, RGB(r, g, b));
     HBRUSH brush = (HBRUSH)GetStockObject(NULL_BRUSH);
-    SelectObject(hdc, pen);
-    SelectObject(hdc, brush);
-    Rectangle(hdc, x, y, x + w, y + h);
+    HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
+    Rectangle(memDC, x, y, x + w, y + h);
+    SelectObject(memDC, oldPen);
+    SelectObject(memDC, oldBrush);
     DeleteObject(pen);
-    ReleaseDC(overlayWnd, hdc);
 }
 
 void DrawLine(int x1, int y1, int x2, int y2, int r, int g, int b, int thickness = 1) {
-    HDC hdc = GetDC(overlayWnd);
     HPEN pen = CreatePen(PS_SOLID, thickness, RGB(r, g, b));
-    SelectObject(hdc, pen);
-    MoveToEx(hdc, x1, y1, NULL);
-    LineTo(hdc, x2, y2);
+    HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+    MoveToEx(memDC, x1, y1, NULL);
+    LineTo(memDC, x2, y2);
+    SelectObject(memDC, oldPen);
     DeleteObject(pen);
-    ReleaseDC(overlayWnd, hdc);
 }
 
 void DrawText(int x, int y, const char* text, int r, int g, int b, int size = 12) {
-    HDC hdc = GetDC(overlayWnd);
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(r, g, b));
-    HFONT font = CreateFontA(size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Verdana");
-    SelectObject(hdc, font);
-    TextOutA(hdc, x, y, text, (int)strlen(text));
+    SetBkMode(memDC, TRANSPARENT);
+    SetTextColor(memDC, RGB(r, g, b));
+    HFONT font = CreateFontA(size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, DEFAULT_PITCH, "Verdana");
+    HFONT oldFont = (HFONT)SelectObject(memDC, font);
+    TextOutA(memDC, x, y, text, (int)strlen(text));
+    SelectObject(memDC, oldFont);
     DeleteObject(font);
-    ReleaseDC(overlayWnd, hdc);
 }
 
 void DrawCircle(int x, int y, int radius, int r, int g, int b) {
-    HDC hdc = GetDC(overlayWnd);
     HPEN pen = CreatePen(PS_SOLID, 2, RGB(r, g, b));
     HBRUSH brush = CreateSolidBrush(RGB(r, g, b));
-    SelectObject(hdc, pen);
-    SelectObject(hdc, brush);
-    Ellipse(hdc, x - radius, y - radius, x + radius, y + radius);
+    HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
+    Ellipse(memDC, x - radius, y - radius, x + radius, y + radius);
+    SelectObject(memDC, oldPen);
+    SelectObject(memDC, oldBrush);
     DeleteObject(pen);
     DeleteObject(brush);
-    ReleaseDC(overlayWnd, hdc);
 }
 
 void DrawHealthBar(int x, int y, int w, int h, int health) {
@@ -220,15 +266,6 @@ void DrawHealthBar(int x, int y, int w, int h, int health) {
 void DrawArmorBar(int x, int y, int w, int h, int armor) {
     int barHeight = (int)(h * (armor / 100.0f));
     DrawFilledRect(x - 11, y + h - barHeight, 3, barHeight, 100, 150, 255);
-}
-
-void ClearScreen() {
-    HDC hdc = GetDC(overlayWnd);
-    RECT full = { 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
-    HBRUSH brush = CreateSolidBrush(RGB(0, 0, 0));
-    FillRect(hdc, &full, brush);
-    DeleteObject(brush);
-    ReleaseDC(overlayWnd, hdc);
 }
 
 void UpdateOverlayPosition() {
@@ -315,19 +352,17 @@ void SilentAim() {
     PlayerData* target = nullptr;
     float closestFov = settings.aimFov;
 
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
 
     for (auto& player : players) {
         if (player.team == localTeam) continue;
         if (player.health <= 0) continue;
 
-        Vector3 headPos = player.headPos;
         Vector3 screenHead;
+        if (!WorldToScreen(player.headPos, screenHead, sw, sh)) continue;
 
-        if (!WorldToScreen(headPos, screenHead, screenWidth, screenHeight)) continue;
-
-        float fov = sqrtf(pow(screenHead.x - screenWidth / 2, 2) + pow(screenHead.y - screenHeight / 2, 2));
+        float fov = sqrtf(pow(screenHead.x - sw / 2, 2) + pow(screenHead.y - sh / 2, 2));
         if (fov < closestFov) {
             closestFov = fov;
             target = &player;
@@ -358,65 +393,37 @@ void UpdatePlayers() {
     players.clear();
 
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
-    printf("[DBG] localPawn = 0x%llX\n", localPawn);
     if (!localPawn) return;
 
     int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
-    int localHealth = ReadMem<int>(localPawn + OFFSET_M_HEALTH);
     Vector3 localPos = GetPlayerPos(localPawn);
-    printf("[DBG] localTeam = %d, localHP = %d, localPos = (%.1f, %.1f, %.1f)\n",
-        localTeam, localHealth, localPos.x, localPos.y, localPos.z);
 
     uintptr_t entityList = ReadMem<uintptr_t>(clientBase + OFFSET_DW_ENTITY_LIST);
-    printf("[DBG] entityList = 0x%llX\n", entityList);
     if (!entityList) return;
 
     for (int i = 1; i <= 64; i++) {
         uintptr_t listEntry = ReadMem<uintptr_t>(entityList + (8 * (i & 0x7FFF) >> 9) + 16);
-        if (!listEntry) {
-            if (i <= 10) printf("[DBG] i=%d: listEntry = 0\n", i);
-            continue;
-        }
+        if (!listEntry) continue;
 
         uintptr_t playerController = ReadMem<uintptr_t>(listEntry + 120 * (i & 0x1FF));
-        if (!playerController) {
-            if (i <= 10) printf("[DBG] i=%d: controller = 0 (listEntry=0x%llX)\n", i, listEntry);
-            continue;
-        }
+        if (!playerController) continue;
 
         uint32_t pawnHandle = ReadMem<uint32_t>(playerController + OFFSET_M_H_PLAYER_PAWN);
-        if (!pawnHandle || pawnHandle == -1) {
-            if (i <= 10) printf("[DBG] i=%d: pawnHandle = 0x%X (controller=0x%llX)\n", i, pawnHandle, playerController);
-            continue;
-        }
+        if (!pawnHandle || pawnHandle == -1) continue;
 
         uintptr_t listEntry2 = ReadMem<uintptr_t>(entityList + (8 * ((pawnHandle & 0x7FFF) >> 9) + 16));
-        if (!listEntry2) {
-            if (i <= 10) printf("[DBG] i=%d: listEntry2 = 0 (handle=0x%X)\n", i, pawnHandle);
-            continue;
-        }
+        if (!listEntry2) continue;
 
         uintptr_t pawn = ReadMem<uintptr_t>(listEntry2 + 120 * (pawnHandle & 0x1FF));
-        if (!pawn || pawn == localPawn) {
-            if (i <= 10) printf("[DBG] i=%d: pawn = 0x%llX (localPawn=0x%llX)\n", i, pawn, localPawn);
-            continue;
-        }
+        if (!pawn || pawn == localPawn) continue;
 
         int lifeState = ReadMem<int>(pawn + OFFSET_M_LIFESTATE);
-        if (lifeState != 256) {
-            if (i <= 10) printf("[DBG] i=%d: lifeState = %d (pawn=0x%llX)\n", i, lifeState, pawn);
-            continue;
-        }
+        if (lifeState != 256) continue;
 
         int health = ReadMem<int>(pawn + OFFSET_M_HEALTH);
-        if (health <= 0 || health > 100) {
-            if (i <= 10) printf("[DBG] i=%d: health = %d (pawn=0x%llX)\n", i, health, pawn);
-            continue;
-        }
+        if (health <= 0 || health > 100) continue;
 
         int team = ReadMem<int>(pawn + OFFSET_M_TEAM);
-
-        printf("[DBG] i=%d: VALID player pawn=0x%llX HP=%d team=%d\n", i, pawn, health, team);
 
         PlayerData player;
         player.controller = playerController;
@@ -435,8 +442,6 @@ void UpdatePlayers() {
         players.push_back(player);
     }
 
-    printf("[DBG] total players found: %d\n\n", (int)players.size());
-
     std::sort(players.begin(), players.end(), [](const PlayerData& a, const PlayerData& b) {
         return a.distance < b.distance;
         });
@@ -445,10 +450,8 @@ void UpdatePlayers() {
 void RenderESP() {
     if (!settings.esp) return;
 
-    printf("[ESP] players.size() = %d\n", (int)players.size());
-
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
 
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
@@ -480,8 +483,8 @@ void RenderESP() {
         }
 
         Vector3 screenPos, screenHead;
-        if (!WorldToScreen(player.position, screenPos, screenWidth, screenHeight)) continue;
-        if (!WorldToScreen(player.headPos, screenHead, screenWidth, screenHeight)) continue;
+        if (!WorldToScreen(player.position, screenPos, sw, sh)) continue;
+        if (!WorldToScreen(player.headPos, screenHead, sw, sh)) continue;
 
         float boxHeight = fabs(screenPos.y - screenHead.y);
         float boxWidth = boxHeight / 1.8f;
@@ -508,7 +511,7 @@ void RenderESP() {
         }
 
         if (settings.snaplines) {
-            DrawLine(screenWidth / 2, screenHeight, (int)screenPos.x, (int)screenPos.y, r, g, b, 1);
+            DrawLine(sw / 2, sh, (int)screenPos.x, (int)screenPos.y, r, g, b, 1);
         }
 
         if (settings.headDot) {
@@ -516,7 +519,7 @@ void RenderESP() {
         }
 
         if (settings.line) {
-            DrawLine((int)screenPos.x, (int)screenPos.y, (int)screenPos.x, screenHeight, r, g, b, 1);
+            DrawLine((int)screenPos.x, (int)screenPos.y, (int)screenPos.x, sh, r, g, b, 1);
         }
 
         int textY = boxY - 18;
@@ -544,10 +547,10 @@ void RenderESP() {
 void DrawCrosshair() {
     if (!settings.crosshair) return;
 
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-    int cx = screenWidth / 2;
-    int cy = screenHeight / 2;
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    int cx = sw / 2;
+    int cy = sh / 2;
 
     DrawLine(cx - 10, cy, cx + 10, cy, 0, 255, 0, 1);
     DrawLine(cx, cy - 10, cx, cy + 10, 0, 255, 0, 1);
@@ -596,7 +599,56 @@ void DrawRadar() {
     }
 }
 
+void DrawToggle(int x, int y, int w, int h, int id, const char* label, bool state) {
+    POINT p;
+    GetCursorPos(&p);
+    bool hover = (p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h);
+
+    int bg = hover ? 45 : 32;
+    DrawFilledRect(x, y, w, h, bg, bg, bg + 16);
+    DrawRect(x, y, w, h, state ? 0 : 90, state ? 200 : 90, state ? 255 : 110, 1);
+
+    DrawText(x + 12, y + (h - 14) / 2, label, 230, 230, 240, 12);
+
+    const char* st = state ? "ON" : "OFF";
+    int sr = state ? 0 : 220;
+    int sg = state ? 255 : 80;
+    int sb = state ? 100 : 80;
+    DrawFilledRect(x + w - 58, y + 5, 50, h - 10, state ? 20 : 40, state ? 80 : 20, state ? 40 : 20);
+    DrawText(x + w - 46, y + (h - 14) / 2, st, sr, sg, sb, 12);
+
+    MenuItem item;
+    item.rect = { x, y, x + w, y + h };
+    item.id = id;
+    menuItems.push_back(item);
+}
+
+void DrawStepper(int x, int y, int w, int h, int idMinus, int idPlus,
+    const char* label, const char* value) {
+    DrawText(x, y + (h - 14) / 2, label, 230, 230, 240, 12);
+
+    int bx = x + w - 110;
+    int bw = 30;
+
+    DrawFilledRect(bx, y, bw, h, 40, 40, 60);
+    DrawRect(bx, y, bw, h, 90, 90, 120, 1);
+    DrawText(bx + 9, y + (h - 14) / 2, "-", 220, 220, 230, 14);
+    MenuItem mi; mi.rect = { bx, y, bx + bw, y + h }; mi.id = idMinus;
+    menuItems.push_back(mi);
+
+    DrawText(bx + 38, y + (h - 14) / 2, value, 0, 200, 255, 12);
+
+    int px = bx + 80;
+    DrawFilledRect(px, y, bw, h, 40, 40, 60);
+    DrawRect(px, y, bw, h, 90, 90, 120, 1);
+    DrawText(px + 9, y + (h - 14) / 2, "+", 220, 220, 230, 14);
+    MenuItem pi; pi.rect = { px, y, px + bw, y + h }; pi.id = idPlus;
+    menuItems.push_back(pi);
+}
+
 void RenderMenu() {
+    menuItems.clear();
+
     if (GetAsyncKeyState(VK_INSERT) & 1) {
         menuOpen = !menuOpen;
         Sleep(150);
@@ -609,141 +661,128 @@ void RenderMenu() {
 
     if (!menuOpen) return;
 
-    int menuX = 50;
-    int menuY = 50;
-    int menuW = 350;
-    int menuH = 570;
-    int itemY = 0;
+    DrawFilledRect(MENU_X, MENU_Y, MENU_W, MENU_H, 18, 18, 28);
+    DrawRect(MENU_X, MENU_Y, MENU_W, MENU_H, 0, 150, 255, 2);
 
-    DrawFilledRect(menuX, menuY, menuW, menuH, 20, 20, 30, 230);
-    DrawRect(menuX, menuY, menuW, menuH, 0, 150, 255, 2);
+    DrawText(MENU_X + MENU_W / 2 - 90, MENU_Y + 12, "NULLCORE CS2", 0, 200, 255, 16);
+    DrawLine(MENU_X + 12, MENU_Y + 40, MENU_X + MENU_W - 12, MENU_Y + 40, 0, 150, 255, 1);
 
-    DrawText(menuX + menuW / 2 - 70, menuY + 10, "NULLCORE CS2 CHEAT", 0, 200, 255, 14);
-    DrawLine(menuX + 10, menuY + 35, menuX + menuW - 10, menuY + 35, 0, 150, 255, 1);
+    int x = MENU_X + 15;
+    int w = MENU_W - 30;
+    int y = MENU_Y + 55;
+    int rowH = 30;
+    int gap = 6;
 
-    itemY = 55;
+    DrawToggle(x, y, w, rowH, 1, "ESP", settings.esp);                    y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 2, "BunnyHop", settings.bhop);              y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 3, "Box ESP", settings.box);                y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 4, "Snaplines", settings.snaplines);        y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 5, "Health ESP", settings.health);          y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 6, "Armor ESP", settings.armor);            y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 7, "Distance", settings.distance);          y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 8, "TriggerBot", settings.triggerbot);      y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 9, "Silent Aim", settings.silentAim);       y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 10, "Radar", settings.radar);               y += rowH + gap;
+    DrawToggle(x, y, w, rowH, 11, "Crosshair", settings.crosshair);       y += rowH + gap;
 
-    DrawText(menuX + 15, menuY + itemY, "[ INSERT ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Show/Hide Menu", 255, 255, 255, 11);
-    itemY += 25;
+    y += 6;
+    DrawLine(x, y - 3, x + w, y - 3, 60, 60, 90, 1);
 
-    DrawText(menuX + 15, menuY + itemY, "[ END ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Exit Cheat", 255, 255, 255, 11);
-    itemY += 35;
+    const char* colors[] = { "Team", "White", "Cyan", "Pink", "Yellow" };
+    DrawStepper(x, y, w, rowH, 20, 21, "ESP Color", colors[settings.espColorMode]);
+    y += rowH + gap;
 
-    DrawLine(menuX + 10, menuY + itemY - 10, menuX + menuW - 10, menuY + itemY - 10, 50, 50, 70, 1);
+    char delayBuf[16]; sprintf_s(delayBuf, "%dms", settings.triggerDelay);
+    DrawStepper(x, y, w, rowH, 22, 23, "Trigger Delay", delayBuf);
+    y += rowH + gap;
 
-    DrawText(menuX + 15, menuY + itemY, "[ F1 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "ESP: ", 255, 255, 255, 11);
-    DrawText(menuX + 180, menuY + itemY, settings.esp ? "ON" : "OFF", settings.esp ? 0 : 255, settings.esp ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F1) & 1) { settings.esp = !settings.esp; Sleep(150); }
-    itemY += 25;
+    char fovBuf[16]; sprintf_s(fovBuf, "%d", settings.aimFov);
+    DrawStepper(x, y, w, rowH, 24, 25, "Aim FOV", fovBuf);
+    y += rowH + gap;
 
-    DrawText(menuX + 15, menuY + itemY, "[ F2 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "BunnyHop: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.bhop ? "ON" : "OFF", settings.bhop ? 0 : 255, settings.bhop ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F2) & 1) { settings.bhop = !settings.bhop; Sleep(150); }
-    itemY += 25;
+    char smoothBuf[16]; sprintf_s(smoothBuf, "%.1f", settings.aimSmoothness);
+    DrawStepper(x, y, w, rowH, 26, 27, "Smoothness", smoothBuf);
+    y += rowH + gap;
 
-    DrawText(menuX + 15, menuY + itemY, "[ F3 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Box ESP: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.box ? "ON" : "OFF", settings.box ? 0 : 255, settings.box ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F3) & 1) { settings.box = !settings.box; Sleep(150); }
-    itemY += 25;
+    DrawText(MENU_X + MENU_W / 2 - 70, MENU_Y + MENU_H - 24,
+        "INSERT - toggle menu", 130, 130, 160, 11);
+}
 
-    DrawText(menuX + 15, menuY + itemY, "[ F4 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Snaplines: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.snaplines ? "ON" : "OFF", settings.snaplines ? 0 : 255, settings.snaplines ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F4) & 1) { settings.snaplines = !settings.snaplines; Sleep(150); }
-    itemY += 25;
+int HitTestMenu(int mx, int my) {
+    for (const auto& item : menuItems) {
+        if (mx >= item.rect.left && mx <= item.rect.right &&
+            my >= item.rect.top && my <= item.rect.bottom) {
+            return item.id;
+        }
+    }
+    return -1;
+}
 
-    DrawText(menuX + 15, menuY + itemY, "[ F5 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Health ESP: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.health ? "ON" : "OFF", settings.health ? 0 : 255, settings.health ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F5) & 1) { settings.health = !settings.health; Sleep(150); }
-    itemY += 25;
+void HandleMenuClick(int mx, int my) {
+    int id = HitTestMenu(mx, my);
+    if (id < 0) return;
 
-    DrawText(menuX + 15, menuY + itemY, "[ F6 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Armor ESP: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.armor ? "ON" : "OFF", settings.armor ? 0 : 255, settings.armor ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F6) & 1) { settings.armor = !settings.armor; Sleep(150); }
-    itemY += 25;
+    switch (id) {
+    case 1: settings.esp = !settings.esp; break;
+    case 2: settings.bhop = !settings.bhop; break;
+    case 3: settings.box = !settings.box; break;
+    case 4: settings.snaplines = !settings.snaplines; break;
+    case 5: settings.health = !settings.health; break;
+    case 6: settings.armor = !settings.armor; break;
+    case 7: settings.distance = !settings.distance; break;
+    case 8: settings.triggerbot = !settings.triggerbot; break;
+    case 9: settings.silentAim = !settings.silentAim; break;
+    case 10: settings.radar = !settings.radar; break;
+    case 11: settings.crosshair = !settings.crosshair; break;
 
-    DrawText(menuX + 15, menuY + itemY, "[ F7 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Distance: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.distance ? "ON" : "OFF", settings.distance ? 0 : 255, settings.distance ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F7) & 1) { settings.distance = !settings.distance; Sleep(150); }
-    itemY += 25;
+    case 20: settings.espColorMode = (settings.espColorMode + 4) % 5; break;
+    case 21: settings.espColorMode = (settings.espColorMode + 1) % 5; break;
 
-    DrawText(menuX + 15, menuY + itemY, "[ F8 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "TriggerBot: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.triggerbot ? "ON" : "OFF", settings.triggerbot ? 0 : 255, settings.triggerbot ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F8) & 1) { settings.triggerbot = !settings.triggerbot; Sleep(150); }
-    itemY += 25;
+    case 22: settings.triggerDelay = max(0, settings.triggerDelay - 10); break;
+    case 23: settings.triggerDelay = min(200, settings.triggerDelay + 10); break;
 
-    DrawText(menuX + 15, menuY + itemY, "[ F9 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Silent Aim: ", 255, 255, 255, 11);
-    DrawText(menuX + 210, menuY + itemY, settings.silentAim ? "ON" : "OFF", settings.silentAim ? 0 : 255, settings.silentAim ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F9) & 1) { settings.silentAim = !settings.silentAim; Sleep(150); }
-    itemY += 25;
+    case 24: settings.aimFov = max(5, settings.aimFov - 5); break;
+    case 25: settings.aimFov = min(180, settings.aimFov + 5); break;
 
-    DrawText(menuX + 15, menuY + itemY, "[ F10 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Radar: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.radar ? "ON" : "OFF", settings.radar ? 0 : 255, settings.radar ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F10) & 1) { settings.radar = !settings.radar; Sleep(150); }
-    itemY += 25;
-
-    DrawText(menuX + 15, menuY + itemY, "[ F11 ]", 200, 200, 200, 11);
-    DrawText(menuX + 110, menuY + itemY, "Crosshair: ", 255, 255, 255, 11);
-    DrawText(menuX + 200, menuY + itemY, settings.crosshair ? "ON" : "OFF", settings.crosshair ? 0 : 255, settings.crosshair ? 255 : 0, 0, 11);
-    if (GetAsyncKeyState(VK_F11) & 1) { settings.crosshair = !settings.crosshair; Sleep(150); }
-    itemY += 35;
-
-    DrawLine(menuX + 10, menuY + itemY - 10, menuX + menuW - 10, menuY + itemY - 10, 50, 50, 70, 1);
-
-    DrawText(menuX + 15, menuY + itemY, "ESP Color:", 255, 255, 255, 11);
-    const char* colorModes[] = { "Team", "White", "Cyan", "Pink", "Yellow" };
-    DrawText(menuX + 120, menuY + itemY, colorModes[settings.espColorMode], 0, 200, 255, 11);
-    DrawText(menuX + 220, menuY + itemY, "[ < > ]", 150, 150, 150, 10);
-    if (GetAsyncKeyState(VK_LEFT) & 1) { settings.espColorMode = (settings.espColorMode + 4) % 5; Sleep(150); }
-    if (GetAsyncKeyState(VK_RIGHT) & 1) { settings.espColorMode = (settings.espColorMode + 1) % 5; Sleep(150); }
-    itemY += 25;
-
-    DrawText(menuX + 15, menuY + itemY, "Trigger Delay:", 255, 255, 255, 11);
-    char delayText[16];
-    sprintf_s(delayText, "%dms", settings.triggerDelay);
-    DrawText(menuX + 140, menuY + itemY, delayText, 0, 200, 255, 11);
-    DrawText(menuX + 210, menuY + itemY, "[ - + ]", 150, 150, 150, 10);
-    if (GetAsyncKeyState(VK_SUBTRACT) & 1) { settings.triggerDelay = max(0, settings.triggerDelay - 10); Sleep(150); }
-    if (GetAsyncKeyState(VK_ADD) & 1) { settings.triggerDelay = min(200, settings.triggerDelay + 10); Sleep(150); }
-    itemY += 25;
-
-    DrawText(menuX + 15, menuY + itemY, "Aim FOV:", 255, 255, 255, 11);
-    char fovText[16];
-    sprintf_s(fovText, "%d", settings.aimFov);
-    DrawText(menuX + 120, menuY + itemY, fovText, 0, 200, 255, 11);
-    DrawText(menuX + 180, menuY + itemY, "[ < > ]", 150, 150, 150, 10);
-    if (GetAsyncKeyState(VK_LEFT) & 1) { settings.aimFov = max(5, settings.aimFov - 5); Sleep(150); }
-    if (GetAsyncKeyState(VK_RIGHT) & 1) { settings.aimFov = min(180, settings.aimFov + 5); Sleep(150); }
-    itemY += 25;
-
-    DrawText(menuX + 15, menuY + itemY, "Smoothness:", 255, 255, 255, 11);
-    char smoothText[16];
-    sprintf_s(smoothText, "%.1f", settings.aimSmoothness);
-    DrawText(menuX + 140, menuY + itemY, smoothText, 0, 200, 255, 11);
-    DrawText(menuX + 210, menuY + itemY, "[ - + ]", 150, 150, 150, 10);
-    if (GetAsyncKeyState(VK_SUBTRACT) & 1) { settings.aimSmoothness = max(1.0f, settings.aimSmoothness - 0.5f); Sleep(150); }
-    if (GetAsyncKeyState(VK_ADD) & 1) { settings.aimSmoothness = min(20.0f, settings.aimSmoothness + 0.5f); Sleep(150); }
-    itemY += 30;
-
-    DrawText(menuX + menuW / 2 - 80, menuY + menuH - 30, "NULLCORE v2.0 | by @nullcore", 100, 100, 150, 10);
+    case 26: settings.aimSmoothness = max(1.0f, settings.aimSmoothness - 0.5f); break;
+    case 27: settings.aimSmoothness = min(20.0f, settings.aimSmoothness + 0.5f); break;
+    }
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
-    case WM_PAINT: ValidateRect(hwnd, NULL); return 0;
-    case WM_ERASEBKGND: return 1;
-    case WM_DESTROY: case WM_CLOSE: running = false; PostQuitMessage(0); return 0;
+    case WM_PAINT:
+        ValidateRect(hwnd, NULL);
+        return 0;
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_LBUTTONDOWN: {
+        if (menuOpen) {
+            int mx = GET_X_LPARAM(lParam);
+            int my = GET_Y_LPARAM(lParam);
+            HandleMenuClick(mx, my);
+        }
+        return 0;
+    }
+
+    case WM_NCHITTEST: {
+        if (!menuOpen) return HTTRANSPARENT;
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(hwnd, &pt);
+        if (pt.x >= MENU_X && pt.x <= MENU_X + MENU_W &&
+            pt.y >= MENU_Y && pt.y <= MENU_Y + MENU_H) {
+            return HTCLIENT;
+        }
+        return HTTRANSPARENT;
+    }
+
+    case WM_DESTROY:
+    case WM_CLOSE:
+        running = false;
+        PostQuitMessage(0);
+        return 0;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
@@ -755,12 +794,12 @@ HWND CreateOverlay() {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = GetModuleHandleW(NULL);
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    wc.hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
+    wc.hbrBackground = NULL;
     wc.lpszClassName = L"NULLCORE_OVERLAY";
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         L"NULLCORE_OVERLAY", L"NULLCORE", WS_POPUP,
         0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
         NULL, NULL, wc.hInstance, NULL);
@@ -795,11 +834,10 @@ int main() {
     clientBase = GetModuleBase(pid, L"client.dll");
     gameWnd = FindWindowW(NULL, L"Counter-Strike 2");
     overlayWnd = CreateOverlay();
+    InitBackBuffer();
 
     printf("[NULLCORE] CS2 PID: %d\n", pid);
     printf("[NULLCORE] client.dll: 0x%llX\n", clientBase);
-    printf("[NULLCORE] gameWnd: 0x%llX\n", (uintptr_t)gameWnd);
-    printf("[NULLCORE] overlayWnd: 0x%llX\n", (uintptr_t)overlayWnd);
 
     MSG msg;
     while (running) {
@@ -823,11 +861,13 @@ int main() {
         TriggerBot();
         SilentAim();
 
+        Present();
+
         Sleep(10);
     }
 
+    ShutdownBackBuffer();
     FreeConsole();
     CloseHandle(gameProcess);
-    printf("[NULLCORE] Shutdown\n");
     return 0;
 }
