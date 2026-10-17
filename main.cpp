@@ -1,7 +1,6 @@
 #include <Windows.h>
 #include <windowsx.h>
 #include <TlHelp32.h>
-#include <dwmapi.h>
 #include <cstdio>
 #include <cmath>
 #include <string>
@@ -9,15 +8,13 @@
 #include <algorithm>
 #include <unordered_map>
 
-#pragma comment(lib, "dwmapi.lib")
-
-#define OFFSET_DW_ENTITY_LIST             0x2546BC0
-#define OFFSET_DW_VIEW_MATRIX             0x2565A10
-#define OFFSET_DW_LOCAL_PLAYER_PAWN       0x2560698
-#define OFFSET_DW_LOCAL_PLAYER_CONTROLLER 0x2537A08
-#define OFFSET_DW_VIEW_ANGLES             0x25767D8
-#define OFFSET_DW_CSGO_INPUT              0x2576150
-#define OFFSET_DW_GLOBAL_VARS             0x222BED8
+#define OFFSET_DW_ENTITY_LIST             0x271A908
+#define OFFSET_DW_VIEW_MATRIX             0x256B020
+#define OFFSET_DW_LOCAL_PLAYER_PAWN       0x2565718
+#define OFFSET_DW_LOCAL_PLAYER_CONTROLLER 0x253CB78
+#define OFFSET_DW_VIEW_ANGLES             0x257BCC8
+#define OFFSET_DW_CSGO_INPUT              0x257B640
+#define OFFSET_DW_GLOBAL_VARS             0x2230090
 
 #define OFFSET_M_HEALTH                   0x34C
 #define OFFSET_M_LIFESTATE                0x354
@@ -27,9 +24,9 @@
 #define OFFSET_M_H_PLAYER_PAWN            0x92C
 #define OFFSET_M_PGAMESCENENODE           0x330
 #define OFFSET_M_VEC_ORIGIN_IN_SCENENODE  0x80
-#define OFFSET_M_ISCOPEN                  0x1EA0
-#define OFFSET_M_ARMOR                    0x1ECC
-#define OFFSET_M_VIEW_ANGLE               0x2580
+#define OFFSET_M_ARMOR                    0x1EC8
+#define OFFSET_M_ID_ENT_INDEX             0x36DC
+#define OFFSET_M_ISCOPED                  0x1E98
 
 HWND overlayWnd = NULL;
 HWND gameWnd = NULL;
@@ -117,17 +114,6 @@ struct Star {
 
 std::vector<Star> stars;
 
-struct Beam {
-    float x;
-    float life;
-    float maxLife;
-    float width;
-    float phase;
-    int r, g, b;
-};
-
-std::vector<Beam> beams;
-
 float menuTime = 0.0f;
 float hueShift = 0.0f;
 
@@ -171,27 +157,44 @@ float crosshairKick = 0.0f;
 float fpsHistory[60] = { 0 };
 int fpsHistoryIdx = 0;
 
-struct Comet {
-    float x, y, vx, vy, life, maxLife, size;
-    int r, g, b;
-};
-std::vector<Comet> comets;
-float cometSpawnTimer = 0.0f;
-
 std::unordered_map<uintptr_t, int> lastHealth;
 
+struct BlackHoleParticle {
+    float angle;
+    float radius;
+    float speed;
+    float life;
+    float maxLife;
+    float size;
+};
+std::vector<BlackHoleParticle> blackHole;
+
+struct MapState {
+    float zoom = 1.0f;
+    float targetZoom = 1.0f;
+    float offsetX = 0.0f;
+    float offsetY = 0.0f;
+    int dragStartX = 0;
+    int dragStartY = 0;
+    bool dragging = false;
+    bool enabled = true;
+};
+MapState mapState;
+
+POINT cachedCursor = { -1, -1 };
+
 const Color3 COLOR_PALETTE[] = {
+    {139, 92, 246},
+    {168, 85, 247},
+    {124, 58, 237},
+    {192, 132, 252},
     {255, 60, 60},
-    {255, 130, 60},
-    {255, 220, 60},
-    {100, 255, 100},
     {60, 220, 255},
-    {100, 130, 255},
-    {200, 100, 255},
-    {255, 100, 200},
+    {100, 255, 100},
+    {255, 220, 60},
     {255, 255, 255},
     {180, 180, 180},
-    {120, 80, 40},
+    {80, 80, 90},
     {40, 40, 40}
 };
 const int COLOR_COUNT = 12;
@@ -226,9 +229,9 @@ struct Settings {
     bool animatedBorder = true;
 
     int espColorMode = 0;
-    int espColorIdx = 0;
-    int trailColorIdx = 4;
-    int menuAccentIdx = 4;
+    int espColorIdx = 1;
+    int trailColorIdx = 0;
+    int menuAccentIdx = 0;
 
     float glowIntensity = 0.8f;
     int triggerDelay = 0;
@@ -262,6 +265,13 @@ struct PlayerData {
 };
 
 std::vector<PlayerData> players;
+
+static HBRUSH g_clearBrush = NULL;
+static HBRUSH g_brushCache[256] = { 0 };
+static COLORREF g_brushColor[256] = { 0 };
+static HPEN g_penCache[256] = { 0 };
+static COLORREF g_penColor[256] = { 0 };
+static int g_penThick[256] = { 0 };
 
 Color3 HSVtoRGB(float h, float s, float v) {
     float c = v * s;
@@ -356,7 +366,7 @@ Vector3 GetPlayerPos(uintptr_t pawn) {
     return ReadMem<Vector3>(sceneNode + OFFSET_M_VEC_ORIGIN_IN_SCENENODE);
 }
 
-bool WorldToScreen(Vector3 world, Vector3& screen, int screenWidth, int screenHeight) {
+__forceinline bool WorldToScreen(Vector3 world, Vector3& screen, int screenWidth, int screenHeight) {
     float w = viewMatrix[12] * world.x + viewMatrix[13] * world.y + viewMatrix[14] * world.z + viewMatrix[15];
     if (w < 0.01f) return false;
 
@@ -391,10 +401,9 @@ void ShutdownBackBuffer() {
 }
 
 void ClearScreen() {
+    if (!g_clearBrush) g_clearBrush = CreateSolidBrush(RGB(1, 1, 1));
     RECT full = { 0, 0, screenW, screenH };
-    HBRUSH brush = CreateSolidBrush(RGB(1, 1, 1));
-    FillRect(memDC, &full, brush);
-    DeleteObject(brush);
+    FillRect(memDC, &full, g_clearBrush);
 }
 
 void Present() {
@@ -404,32 +413,24 @@ void Present() {
 }
 
 HBRUSH GetBrushCached(int r, int g, int b) {
-    static std::unordered_map<int, HBRUSH> cache;
     COLORREF c = RGB(r, g, b);
-    auto it = cache.find((int)c);
-    if (it != cache.end()) return it->second;
-    if (cache.size() > 200) {
-        for (auto& p : cache) DeleteObject(p.second);
-        cache.clear();
-    }
-    HBRUSH hb = CreateSolidBrush(c);
-    cache[(int)c] = hb;
-    return hb;
+    int slot = (((c >> 3) & 0x1F) ^ ((c >> 8) & 0x3E0) ^ ((c >> 13) & 0x1F000)) & 255;
+    if (g_brushCache[slot] && g_brushColor[slot] == c) return g_brushCache[slot];
+    if (g_brushCache[slot]) DeleteObject(g_brushCache[slot]);
+    g_brushCache[slot] = CreateSolidBrush(c);
+    g_brushColor[slot] = c;
+    return g_brushCache[slot];
 }
 
 HPEN GetPenCached(int r, int g, int b, int thickness) {
-    static std::unordered_map<int, HPEN> cache;
     COLORREF c = RGB(r, g, b);
-    int key = (int)c ^ (thickness << 24);
-    auto it = cache.find(key);
-    if (it != cache.end()) return it->second;
-    if (cache.size() > 150) {
-        for (auto& p : cache) DeleteObject(p.second);
-        cache.clear();
-    }
-    HPEN hp = CreatePen(PS_SOLID, thickness, c);
-    cache[key] = hp;
-    return hp;
+    int slot = (((c >> 3) & 0x1F) ^ ((c >> 8) & 0x3E0) ^ ((c >> 13) & 0x1F000) ^ (thickness << 16)) & 255;
+    if (g_penCache[slot] && g_penColor[slot] == c && g_penThick[slot] == thickness) return g_penCache[slot];
+    if (g_penCache[slot]) DeleteObject(g_penCache[slot]);
+    g_penCache[slot] = CreatePen(PS_SOLID, thickness, c);
+    g_penColor[slot] = c;
+    g_penThick[slot] = thickness;
+    return g_penCache[slot];
 }
 
 void DrawFilledRect(int x, int y, int w, int h, int r, int g, int b, int a = 255) {
@@ -542,6 +543,20 @@ float EaseOutCubic(float t) {
     return 1.0f - powf(1.0f - t, 3.0f);
 }
 
+float EaseInOutCubic(float t) {
+    return t < 0.5f ? 4.0f * t * t * t : 1.0f - powf(-2.0f * t + 2.0f, 3.0f) * 0.5f;
+}
+
+float EaseOutBack(float t) {
+    const float c1 = 1.70158f;
+    const float c3 = c1 + 1.0f;
+    return 1.0f + c3 * powf(t - 1.0f, 3.0f) + c1 * powf(t - 1.0f, 2.0f);
+}
+
+float Lerp(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
 void UpdateFPS() {
     frameCount++;
     DWORD now = GetTickCount();
@@ -565,7 +580,7 @@ void InitStars() {
         s.x = (float)(rand() % screenW);
         s.y = (float)(rand() % screenH);
         s.twinkle = (float)(rand() % 100) / 100.0f;
-        s.speed = 0.005f + (rand() % 30) / 1000.0f;
+        s.speed = 0.003f + (rand() % 30) / 1000.0f;
         stars.push_back(s);
     }
 }
@@ -587,21 +602,6 @@ void SpawnSparkle(float x, float y, int r, int g, int b) {
     s.b = b;
     s.size = 1.5f + (float)(rand() % 20) / 10.0f;
     sparkles.push_back(s);
-}
-
-void SpawnBeam(int r, int g, int b) {
-    if (beams.size() > 12) return;
-
-    Beam bm;
-    bm.x = (float)(rand() % 1000) / 1000.0f;
-    bm.maxLife = 4.0f + (float)(rand() % 400) / 100.0f;
-    bm.life = bm.maxLife;
-    bm.width = 20.0f + (float)(rand() % 60);
-    bm.phase = (float)(rand() % 628) / 100.0f;
-    bm.r = r;
-    bm.g = g;
-    bm.b = b;
-    beams.push_back(bm);
 }
 
 void UpdateParticles() {
@@ -637,97 +637,33 @@ void UpdateParticles() {
 
 void UpdateStars() {
     if (!settings.starsBg) return;
-
     for (auto& s : stars) {
         s.twinkle += s.speed;
-        if (s.twinkle > 1.0f) s.twinkle = 0.0f;
-    }
-}
-
-void UpdateBeams() {
-    if (!settings.beamsBg) {
-        beams.clear();
-        return;
-    }
-
-    for (auto& b : beams) {
-        b.life -= 0.016f;
-    }
-
-    beams.erase(
-        std::remove_if(beams.begin(), beams.end(),
-            [](const Beam& b) { return b.life <= 0.0f; }),
-        beams.end());
-
-    if (beams.size() < 6 && (rand() % 100) < 2) {
-        Color3 a = GetAccent();
-        SpawnBeam(a.r, a.g, a.b);
+        if (s.twinkle > 1.0f) s.twinkle -= 1.0f;
     }
 }
 
 void DrawStars(float anchorX, float anchorY, int w, int h) {
     if (!settings.starsBg) return;
-
     Color3 a = GetAccent();
 
     for (const auto& s : stars) {
-        float tw = sinf(s.twinkle * 3.14159f * 2.0f);
-        float alpha = 0.3f + 0.7f * fabsf(tw);
+        float tw = sinf(s.twinkle * 6.28318f);
+        float alpha = 0.15f + 0.5f * fabsf(tw);
 
         int px = (int)(anchorX + fmodf(s.x, (float)w));
         int py = (int)(anchorY + fmodf(s.y, (float)h));
-
         if (px < anchorX || px > anchorX + w || py < anchorY || py > anchorY + h) continue;
 
-        int r = (int)(a.r * alpha * 0.5f);
-        int g = (int)(a.g * alpha * 0.5f);
-        int b = (int)(a.b * alpha * 0.5f);
-
+        int r = (int)(a.r * alpha * 0.4f);
+        int g = (int)(a.g * alpha * 0.4f);
+        int b = (int)(a.b * alpha * 0.4f);
         if (r < 3) r = 3;
         if (g < 3) g = 3;
         if (b < 3) b = 3;
 
         int size = (int)(1 + fabsf(tw) * 2);
         DrawFilledRect(px, py, size, size, r, g, b);
-    }
-}
-
-void DrawBeams(float anchorX, float anchorY, int w, int h) {
-    if (!settings.beamsBg) return;
-
-    for (const auto& b : beams) {
-        float lifeT = b.life / b.maxLife;
-        float fade = lifeT < 0.3f ? lifeT / 0.3f : (lifeT > 0.7f ? (1.0f - lifeT) / 0.3f : 1.0f);
-        if (fade < 0.0f) fade = 0.0f;
-
-        float wobble = sinf(menuTime * 0.8f + b.phase) * 30.0f;
-        int bx = (int)(anchorX + b.x * w + wobble);
-        int bw = (int)b.width;
-
-        if (bx < (int)anchorX - bw) bx = (int)anchorX - bw;
-        if (bx > (int)anchorX + w) continue;
-
-        for (int row = 0; row < h; row += 4) {
-            float vt = (float)row / h;
-            float bandPulse = 0.5f + 0.5f * sinf(menuTime * 1.5f + b.phase + vt * 6.28f);
-            float a = fade * bandPulse * 0.18f;
-            if (a < 0.02f) continue;
-
-            int r = (int)(b.r * a);
-            int g = (int)(b.g * a);
-            int bb = (int)(b.b * a);
-            if (r < 2) r = 2;
-            if (g < 2) g = 2;
-            if (bb < 2) bb = 2;
-
-            int rowX = bx + (int)(sinf(menuTime * 1.2f + b.phase + vt * 4.0f) * 6.0f);
-            if (rowX < (int)anchorX) rowX = (int)anchorX;
-            int rowW = bw;
-            if (rowX + rowW > (int)anchorX + w) rowW = (int)(anchorX + w) - rowX;
-            if (rowW <= 0) continue;
-
-            DrawFilledRect(rowX, (int)(anchorY + row), rowW, 4, r, g, bb);
-        }
     }
 }
 
@@ -772,12 +708,10 @@ void UpdateMouseTrail() {
         return;
     }
 
-    POINT p;
-    GetCursorPos(&p);
-    ScreenToClient(overlayWnd, &p);
+    POINT p = cachedCursor;
 
     for (auto& pt : mouseTrail) {
-        pt.life -= 0.08f;
+        pt.life -= 0.045f;
     }
 
     mouseTrail.erase(
@@ -800,7 +734,7 @@ void UpdateMouseTrail() {
         tp.b = c.b;
         mouseTrail.push_back(tp);
 
-        if (mouseTrail.size() > 22) {
+        if (mouseTrail.size() > 30) {
             mouseTrail.erase(mouseTrail.begin());
         }
 
@@ -856,9 +790,6 @@ void DrawMouseTrail() {
     }
 }
 
-void DrawCursorGlow() {}
-void DrawCustomCursor() {}
-
 void DrawHealthBar(int x, int y, int w, int h, int health) {
     int barHeight = (int)(h * (health / 100.0f));
     int red = 255 - (int)(health * 2.55f);
@@ -872,18 +803,11 @@ void DrawArmorBar(int x, int y, int w, int h, int armor) {
     DrawFilledRect(x - 11, y + h - barHeight, 3, barHeight, 100, 150, 255);
 }
 
-void UpdateOverlayPosition() {
-    static bool positioned = false;
-    if (positioned) return;
-    SetWindowPos(overlayWnd, HWND_TOPMOST, 0, 0,
-        GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
-        SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    positioned = true;
-}
-
 void UpdateCursorState() {
     POINT p;
     GetCursorPos(&p);
+    cachedCursor.x = p.x;
+    cachedCursor.y = p.y;
 
     bool over = false;
 
@@ -931,7 +855,7 @@ void TriggerBot() {
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
 
-    int crosshairId = ReadMem<int>(localPawn + 0x33FC);
+    int crosshairId = ReadMem<int>(localPawn + OFFSET_M_ID_ENT_INDEX);
     if (crosshairId <= 0 || crosshairId > 64) return;
 
     uintptr_t entityList = ReadMem<uintptr_t>(clientBase + OFFSET_DW_ENTITY_LIST);
@@ -989,7 +913,7 @@ void SilentAim() {
         Vector3 screenHead;
         if (!WorldToScreen(player.headPos, screenHead, sw, sh)) continue;
 
-        float fov = sqrtf(powf(screenHead.x - sw / 2, 2) + powf(screenHead.y - sh / 2, 2));
+        float fov = sqrtf(powf(screenHead.x - sw / 2.0f, 2) + powf(screenHead.y - sh / 2.0f, 2));
         if (fov < closestFov) {
             closestFov = fov;
             target = &player;
@@ -1089,14 +1013,10 @@ void UpdatePlayers() {
         player.alive = true;
         player.distance = localPos.DistTo(player.position);
 
-        ReadProcessMemory(gameProcess, (LPCVOID)(playerController + 0x6F4), player.name, sizeof(player.name), NULL);
+        ReadProcessMemory(gameProcess, (LPCVOID)(playerController + 0x6FC), player.name, sizeof(player.name), NULL);
 
         players.push_back(player);
     }
-
-    std::sort(players.begin(), players.end(), [](const PlayerData& a, const PlayerData& b) {
-        return a.distance < b.distance;
-        });
 }
 
 void SpawnHitMarker(int damage, bool isKill) {
@@ -1163,63 +1083,6 @@ void DrawDeathMarks() {
         int gg = (int)(60 * t);
         DrawLine((int)scr.x - sz, (int)scr.y - sz, (int)scr.x + sz, (int)scr.y + sz, rr, gg, gg, 2);
         DrawLine((int)scr.x + sz, (int)scr.y - sz, (int)scr.x - sz, (int)scr.y + sz, rr, gg, gg, 2);
-    }
-}
-
-void UpdateComets() {
-    cometSpawnTimer += 0.016f;
-    if (cometSpawnTimer > 0.4f && comets.size() < 8 && settings.beamsBg) {
-        cometSpawnTimer = 0.0f;
-        Comet c;
-        c.x = (float)(rand() % MENU_W);
-        c.y = (float)(rand() % MENU_H);
-        float ang = (float)(rand() % 360) * 3.14159f / 180.0f;
-        float sp = 0.5f + (float)(rand() % 100) / 100.0f;
-        c.vx = cosf(ang) * sp;
-        c.vy = sinf(ang) * sp * 0.4f;
-        c.maxLife = 2.5f + (float)(rand() % 20) / 10.0f;
-        c.life = c.maxLife;
-        c.size = 2.0f + (float)(rand() % 20) / 10.0f;
-        Color3 a = GetAccent();
-        c.r = a.r; c.g = a.g; c.b = a.b;
-        comets.push_back(c);
-    }
-    for (auto& c : comets) {
-        c.x += c.vx; c.y += c.vy;
-        c.life -= 0.016f;
-    }
-    comets.erase(
-        std::remove_if(comets.begin(), comets.end(),
-            [](const Comet& c) { return c.life <= 0.0f; }),
-        comets.end());
-}
-
-void DrawComets(float anchorX, float anchorY, int w, int h) {
-    if (!settings.beamsBg) return;
-    for (const auto& c : comets) {
-        float t = c.life / c.maxLife;
-        float fade = t > 0.8f ? (1.0f - t) / 0.2f : (t < 0.2f ? t / 0.2f : 1.0f);
-        int sz = (int)(c.size * fade * 3.0f);
-        if (sz < 1) continue;
-        int r = (int)(c.r * fade * 0.8f);
-        int g = (int)(c.g * fade * 0.8f);
-        int b = (int)(c.b * fade * 0.8f);
-        if (r < 8) r = 8;
-        if (g < 8) g = 8;
-        if (b < 8) b = 8;
-
-        for (int i = 1; i <= 4; i++) {
-            int tx = (int)(anchorX + c.x - c.vx * i * 3);
-            int ty = (int)(anchorY + c.y - c.vy * i * 3);
-            int tr = r / (i + 1), tg = g / (i + 1), tb = b / (i + 1);
-            if (tr < 3) tr = 3;
-            if (tg < 3) tg = 3;
-            if (tb < 3) tb = 3;
-            int ts = sz / (i + 1);
-            if (ts < 1) ts = 1;
-            DrawFilledRect(tx, ty, ts, ts, tr, tg, tb);
-        }
-        DrawFilledCircle((int)(anchorX + c.x), (int)(anchorY + c.y), sz, r, g, b);
     }
 }
 
@@ -1387,20 +1250,29 @@ void DrawCrosshair() {
 void DrawRadar() {
     if (!settings.radar) return;
 
-    int radarX = GetSystemMetrics(SM_CXSCREEN) - 210;
-    int radarY = 10;
-    int radarSize = 200;
+    int baseX = GetSystemMetrics(SM_CXSCREEN) - 220;
+    int baseY = 10;
+    int radarSize = 210;
 
     Color3 a = GetAccent();
 
-    DrawFilledRect(radarX, radarY, radarSize, radarSize, 0, 0, 0, 180);
-    DrawRect(radarX, radarY, radarSize, radarSize, a.r / 2, a.g / 2, a.b / 2, 1);
+    mapState.zoom += (mapState.targetZoom - mapState.zoom) * 0.2f;
+    if (mapState.zoom < 0.5f) mapState.zoom = 0.5f;
+    if (mapState.zoom > 4.0f) mapState.zoom = 4.0f;
 
-    DrawLine(radarX + radarSize / 2, radarY, radarX + radarSize / 2, radarY + radarSize, a.r, a.g, a.b, 1);
-    DrawLine(radarX, radarY + radarSize / 2, radarX + radarSize, radarY + radarSize / 2, a.r, a.g, a.b, 1);
+    DrawRoundedRect(baseX - 2, baseY - 2, radarSize + 4, radarSize + 4, 8, 5, 5, 8);
+    DrawFilledRect(baseX, baseY, radarSize, radarSize, 5, 5, 8);
+    DrawRoundedRectOutline(baseX, baseY, radarSize, radarSize, 8, a.r, a.g, a.b, 2);
 
-    float pulseR = 5.0f + 2.0f * sinf(menuTime * 4.0f);
-    DrawCircle(radarX + radarSize / 2, radarY + radarSize / 2, (int)pulseR, a.r, a.g, a.b);
+    for (int gx = 0; gx < radarSize; gx += 30) {
+        DrawFilledRect(baseX + gx, baseY, 1, radarSize, 15, 12, 22);
+    }
+    for (int gy = 0; gy < radarSize; gy += 30) {
+        DrawFilledRect(baseX, baseY + gy, radarSize, 1, 15, 12, 22);
+    }
+
+    DrawLine(baseX + radarSize / 2, baseY, baseX + radarSize / 2, baseY + radarSize, a.r / 2, a.g / 2, a.b / 2, 1);
+    DrawLine(baseX, baseY + radarSize / 2, baseX + radarSize, baseY + radarSize / 2, a.r / 2, a.g / 2, a.b / 2, 1);
 
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
@@ -1410,25 +1282,67 @@ void DrawRadar() {
 
     Color3 e = GetEspColor();
 
+    float cx = baseX + radarSize / 2.0f + mapState.offsetX;
+    float cy = baseY + radarSize / 2.0f + mapState.offsetY;
+
     for (const auto& player : players) {
         if (player.team == localTeam) continue;
 
         float dx = player.position.x - localPos.x;
         float dy = player.position.y - localPos.y;
         float distance = sqrtf(dx * dx + dy * dy);
-        if (distance > 1500) continue;
+        if (distance > 3000.0f) continue;
 
-        float rad = atan2(dy, dx);
-        float nx = cos(rad) * (distance / 1500.0f) * (radarSize / 2);
-        float ny = sin(rad) * (distance / 1500.0f) * (radarSize / 2);
+        float scale = (radarSize / 2.0f) / 1500.0f * mapState.zoom;
+        float nx = dx * scale;
+        float ny = dy * scale;
 
-        int px = (int)(radarX + radarSize / 2 + nx);
-        int py = (int)(radarY + radarSize / 2 + ny);
+        int px = (int)(cx + nx);
+        int py = (int)(cy + ny);
 
-        if (px >= radarX && px <= radarX + radarSize && py >= radarY && py <= radarY + radarSize) {
-            DrawFilledRect(px - 2, py - 2, 4, 4, e.r, e.g, e.b);
-        }
+        if (px < baseX + 2 || px > baseX + radarSize - 2) continue;
+        if (py < baseY + 2 || py > baseY + radarSize - 2) continue;
+
+        int dotSize = (int)(2 + mapState.zoom);
+        DrawFilledRect(px - dotSize, py - dotSize, dotSize * 2, dotSize * 2, e.r, e.g, e.b);
     }
+
+    float pulseR = 4.0f + 2.0f * sinf(menuTime * 4.0f);
+    DrawFilledCircle((int)cx, (int)cy, (int)pulseR, a.r, a.g, a.b);
+    DrawFilledCircle((int)cx, (int)cy, 1, 255, 255, 255);
+
+    int btnY = baseY + radarSize + 4;
+    int btnH = 18;
+    int btnW = 24;
+    int btnX = baseX;
+
+    bool hoverMinus = (cachedCursor.x >= btnX && cachedCursor.x <= btnX + btnW &&
+        cachedCursor.y >= btnY && cachedCursor.y <= btnY + btnH);
+    DrawRoundedRect(btnX, btnY, btnW, btnH, 4, hoverMinus ? a.r / 3 : 15, hoverMinus ? a.g / 3 : 15, hoverMinus ? a.b / 3 : 20);
+    DrawTextCenter(btnX + btnW / 2, btnY + 3, "-", 220, 220, 230, 12);
+
+    MenuItem mi; mi.rect = { btnX, btnY, btnX + btnW, btnY + btnH }; mi.id = 500;
+    menuItems.push_back(mi);
+
+    btnX += btnW + 4;
+    bool hoverPlus = (cachedCursor.x >= btnX && cachedCursor.x <= btnX + btnW &&
+        cachedCursor.y >= btnY && cachedCursor.y <= btnY + btnH);
+    DrawRoundedRect(btnX, btnY, btnW, btnH, 4, hoverPlus ? a.r / 3 : 15, hoverPlus ? a.g / 3 : 15, hoverPlus ? a.b / 3 : 20);
+    DrawTextCenter(btnX + btnW / 2, btnY + 3, "+", 220, 220, 230, 12);
+    MenuItem pi; pi.rect = { btnX, btnY, btnX + btnW, btnY + btnH }; pi.id = 501;
+    menuItems.push_back(pi);
+
+    btnX += btnW + 4;
+    bool hoverReset = (cachedCursor.x >= btnX && cachedCursor.x <= btnX + btnW &&
+        cachedCursor.y >= btnY && cachedCursor.y <= btnY + btnH);
+    DrawRoundedRect(btnX, btnY, btnW, btnH, 4, hoverReset ? a.r / 3 : 15, hoverReset ? a.g / 3 : 15, hoverReset ? a.b / 3 : 20);
+    DrawTextCenter(btnX + btnW / 2, btnY + 3, "R", 220, 220, 230, 12);
+    MenuItem ri; ri.rect = { btnX, btnY, btnX + btnW, btnY + btnH }; ri.id = 502;
+    menuItems.push_back(ri);
+
+    char zoomTxt[32];
+    sprintf_s(zoomTxt, "%.1fx", mapState.zoom);
+    DrawText(baseX + radarSize - 50, btnY + 2, zoomTxt, 180, 160, 230, 10);
 }
 
 void DrawGradientHLine(int x, int y, int w, Color3 a, Color3 b) {
@@ -1465,20 +1379,24 @@ void DrawBadge(int x, int y, const char* txt, bool on) {
 
 void DrawAuroraWaves(float anchorX, float anchorY, int w, int h, Color3 a) {
     if (!settings.auroraWaves) return;
-    int baseY = (int)(anchorY + h * 0.55f);
-    for (int layer = 0; layer < 3; layer++) {
-        float phase = menuTime * (0.4f + layer * 0.15f) + layer * 2.1f;
-        float amp = 18.0f + layer * 8.0f;
-        float freq = 0.008f + layer * 0.003f;
-        float alphaMul = 0.22f - layer * 0.05f;
+    int baseY = (int)(anchorY + h * 0.6f);
 
-        for (int x = 0; x < w; x += 3) {
+    for (int layer = 0; layer < 2; layer++) {
+        float phase = menuTime * (0.22f + layer * 0.11f) + layer * 3.7f;
+        float amp = 22.0f + layer * 14.0f;
+        float freq = 0.006f + layer * 0.004f;
+        float alphaMul = 0.16f - layer * 0.05f;
+
+        for (int x = 0; x < w; x += 4) {
             float yOff = sinf(x * freq + phase) * amp
-                + sinf(x * freq * 2.3f + phase * 1.7f) * (amp * 0.4f);
+                + sinf(x * freq * 1.73f + phase * 0.8f) * (amp * 0.35f);
             int py = baseY + (int)yOff;
             if (py < anchorY || py > anchorY + h) continue;
 
             float edgeFade = 1.0f - fabsf((float)x / w - 0.5f) * 2.0f;
+            if (edgeFade < 0.0f) edgeFade = 0.0f;
+            edgeFade = edgeFade * edgeFade;
+
             float a2 = alphaMul * edgeFade;
             if (a2 < 0.01f) continue;
 
@@ -1488,7 +1406,7 @@ void DrawAuroraWaves(float anchorX, float anchorY, int w, int h, Color3 a) {
             if (r < 1) r = 1;
             if (g < 1) g = 1;
             if (b < 1) b = 1;
-            DrawFilledRect((int)anchorX + x, py, 3, 2, r, g, b);
+            DrawFilledRect((int)anchorX + x, py, 4, 2, r, g, b);
         }
     }
 }
@@ -1515,34 +1433,33 @@ void DrawAnimatedBorder(int x, int y, int w, int h, int radius, Color3 a) {
 
 void DrawToggleEx(int x, int y, int w, int h, int id, const char* label,
     bool& state, int animSlot) {
-    POINT p;
-    GetCursorPos(&p);
-    ScreenToClient(overlayWnd, &p);
-    bool hover = (p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h);
+    bool hover = (cachedCursor.x >= x && cachedCursor.x <= x + w &&
+        cachedCursor.y >= y && cachedCursor.y <= y + h);
 
     if (animSlot < 0) animSlot = 0;
     if (animSlot > 63) animSlot = 63;
+
     float& ta = settings.toggleAnim[animSlot];
     float target = state ? 1.0f : 0.0f;
-    ta += (target - ta) * 0.25f;
+    ta += (target - ta) * 0.15f;
 
     Color3 a = GetAccent();
-    int bg = hover ? 20 : 10;
+    int bg = hover ? 22 : 12;
     int textShift = hover ? 2 : 0;
 
     if (hover) {
         for (int i = 3; i >= 1; i--) {
             DrawRoundedRect(x - i, y - i, w + i * 2, h + i * 2, 8 + i,
-                a.r / 12, a.g / 12, a.b / 12);
+                a.r / 14, a.g / 14, a.b / 14);
         }
     }
 
-    DrawRoundedRect(x, y, w, h, 8, bg, bg, bg + 2);
+    DrawRoundedRect(x, y, w, h, 8, bg, bg, bg + 3);
 
     if (hover)
         DrawRoundedRectOutline(x, y, w, h, 8, a.r, a.g, a.b, 1);
 
-    if (ta > 0.1f) {
+    if (ta > 0.05f) {
         int barH = (int)((h - 8) * ta);
         DrawFilledRect(x + 2, y + (h - barH) / 2, 2, barH,
             (int)(a.r * ta), (int)(a.g * ta), (int)(a.b * ta));
@@ -1551,22 +1468,27 @@ void DrawToggleEx(int x, int y, int w, int h, int id, const char* label,
     DrawFilledCircle(x + 14, y + h / 2, 3,
         state ? a.r : 60, state ? a.g : 60, state ? a.b : 65);
 
-    DrawText(x + 24 + textShift, y + (h - 14) / 2, label,
-        220, 225, 235, 12);
+    DrawText(x + 24 + textShift, y + (h - 14) / 2, label, 220, 225, 235, 12);
 
     int tw = 42, th = 20;
     int tx = x + w - tw - 8;
     int ty = y + (h - th) / 2;
 
-    int offR = 30, offG = 30, offB = 34;
-    int r = (int)(offR + (a.r - offR) * ta);
-    int g = (int)(offG + (a.g - offG) * ta);
-    int b = (int)(offB + (a.b - offB) * ta);
+    int offR = 30, offG = 30, offB = 36;
+    int r = (int)Lerp((float)offR, (float)a.r, ta);
+    int g = (int)Lerp((float)offG, (float)a.g, ta);
+    int b = (int)Lerp((float)offB, (float)a.b, ta);
     DrawRoundedRect(tx, ty, tw, th, th / 2, r, g, b);
 
+    float spring = ta;
+    if (state) {
+        spring = EaseOutBack(ta);
+    }
+
     int knobR = 8;
-    int knobX = (int)(tx + 3 + (tw - th) * ta);
+    int knobX = (int)(tx + 3 + (tw - th) * spring);
     int knobY = ty + (th - knobR * 2) / 2;
+
     HBRUSH brush = GetBrushCached(240, 245, 255);
     HPEN pen = GetPenCached(240, 245, 255, 1);
     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
@@ -1587,9 +1509,11 @@ void DrawTabs(int x, int y, int w, const char** names, int count,
     int tabW = w / count;
 
     float targetAnim = (float)active;
-    anim += (targetAnim - anim) * 0.2f;
+    anim += (targetAnim - anim) * 0.12f;
 
-    int ulX = x + (int)(anim * tabW) + 6;
+    float easedAnim = EaseInOutCubic(anim);
+
+    int ulX = x + (int)(easedAnim * tabW) + 6;
     int ulW = tabW - 12;
     DrawFilledRect(ulX, y + 28, ulW, 2, a.r, a.g, a.b);
     DrawFilledRect(ulX + 4, y + 29, ulW - 8, 1, a.r / 2, a.g / 2, a.b / 2);
@@ -1597,15 +1521,12 @@ void DrawTabs(int x, int y, int w, const char** names, int count,
     for (int i = 0; i < count; i++) {
         int tx = x + i * tabW;
         bool isActive = (i == active);
+        bool hover = (cachedCursor.x >= tx && cachedCursor.x <= tx + tabW &&
+            cachedCursor.y >= y && cachedCursor.y <= y + 28);
 
-        POINT mp;
-        GetCursorPos(&mp);
-        ScreenToClient(overlayWnd, &mp);
-        bool hover = (mp.x >= tx && mp.x <= tx + tabW && mp.y >= y && mp.y <= y + 28);
-
-        int cr = isActive ? 230 : (hover ? 200 : 130);
-        int cg = isActive ? 235 : (hover ? 205 : 135);
-        int cb = isActive ? 245 : (hover ? 215 : 155);
+        int cr = isActive ? 235 : (hover ? 200 : 130);
+        int cg = isActive ? 235 : (hover ? 200 : 135);
+        int cb = isActive ? 248 : (hover ? 215 : 155);
 
         DrawTextCenter(tx + tabW / 2, y + 7, names[i], cr, cg, cb, 11);
 
@@ -1628,14 +1549,11 @@ void DrawStepperEx(int x, int y, int w, int h, int idMinus, int idPlus,
         DrawFilledRect(x + 4, pbY, (int)(pbW * progress), 2, a.r, a.g, a.b);
     }
 
-    POINT mp;
-    GetCursorPos(&mp);
-    ScreenToClient(overlayWnd, &mp);
-
     int bx = x + w - 130;
     int bw = 30;
 
-    bool hM = (mp.x >= bx && mp.x <= bx + bw && mp.y >= y && mp.y <= y + h);
+    bool hM = (cachedCursor.x >= bx && cachedCursor.x <= bx + bw &&
+        cachedCursor.y >= y && cachedCursor.y <= y + h);
     DrawRoundedRect(bx, y + 2, bw, h - 4, 6,
         hM ? a.r / 2 : 28, hM ? a.g / 2 : 28, hM ? a.b / 2 : 32);
     DrawTextCenter(bx + bw / 2, y + (h - 16) / 2, "-", 220, 220, 230, 15);
@@ -1645,7 +1563,8 @@ void DrawStepperEx(int x, int y, int w, int h, int idMinus, int idPlus,
     DrawTextCenter(bx + 58, y + (h - 14) / 2, value, a.r, a.g, a.b, 11);
 
     int px = bx + 90;
-    bool hP = (mp.x >= px && mp.x <= px + bw && mp.y >= y && mp.y <= y + h);
+    bool hP = (cachedCursor.x >= px && cachedCursor.x <= px + bw &&
+        cachedCursor.y >= y && cachedCursor.y <= y + h);
     DrawRoundedRect(px, y + 2, bw, h - 4, 6,
         hP ? a.r / 2 : 28, hP ? a.g / 2 : 28, hP ? a.b / 2 : 32);
     DrawTextCenter(px + bw / 2, y + (h - 16) / 2, "+", 220, 220, 230, 15);
@@ -1661,14 +1580,11 @@ void DrawColorPicker(int x, int y, int w, int h, int idLeft, int idRight,
 
     DrawText(x + 4, y + (h - 14) / 2, label, 220, 225, 235, 12);
 
-    POINT mp;
-    GetCursorPos(&mp);
-    ScreenToClient(overlayWnd, &mp);
-
     int bx = x + w - 130;
     int bw = 30;
 
-    bool hoverMinus = (mp.x >= bx && mp.x <= bx + bw && mp.y >= y && mp.y <= y + h);
+    bool hoverMinus = (cachedCursor.x >= bx && cachedCursor.x <= bx + bw &&
+        cachedCursor.y >= y && cachedCursor.y <= y + h);
     DrawRoundedRect(bx, y + 2, bw, h - 4, 6,
         hoverMinus ? a.r / 2 : 28,
         hoverMinus ? a.g / 2 : 28,
@@ -1681,7 +1597,8 @@ void DrawColorPicker(int x, int y, int w, int h, int idLeft, int idRight,
     DrawRect(bx + 40, y + (h - 18) / 2, 30, 18, 200, 200, 200, 1);
 
     int px = bx + 90;
-    bool hoverPlus = (mp.x >= px && mp.x <= px + bw && mp.y >= y && mp.y <= y + h);
+    bool hoverPlus = (cachedCursor.x >= px && cachedCursor.x <= px + bw &&
+        cachedCursor.y >= y && cachedCursor.y <= y + h);
     DrawRoundedRect(px, y + 2, bw, h - 4, 6,
         hoverPlus ? a.r / 2 : 28,
         hoverPlus ? a.g / 2 : 28,
@@ -1702,13 +1619,17 @@ void RenderSettingsPanel() {
 
     for (int i = 6; i >= 0; i--) {
         int gray = 1 + (int)((7 - i) * 2 * sa);
-        DrawRoundedRect(sx - i, sy - i, SET_W + i * 2, sh + i * 2, 10 + i, gray, gray, gray);
+        DrawRoundedRect(sx - i, sy - i, SET_W + i * 2, sh + i * 2, 10 + i, gray, gray, gray + 2);
     }
 
     DrawRoundedRect(sx, sy, SET_W, sh, 10, 0, 0, 0);
+    for (int i = 0; i < sh; i += 6) {
+        float t = (float)i / sh;
+        int shade = 4 + (int)(t * 4.0f);
+        DrawFilledRect(sx + 1, sy + i, SET_W - 2, 6, shade, shade - 1, shade + 3);
+    }
     DrawAuroraWaves((float)sx, (float)sy, SET_W, sh, a);
     DrawStars((float)sx, (float)sy, SET_W, sh);
-    DrawBeams((float)sx, (float)sy, SET_W, sh);
     DrawRoundedRectOutline(sx, sy, SET_W, sh, 10, a.r, a.g, a.b, 2);
 
     if (sh < 60) return;
@@ -1757,7 +1678,6 @@ void RenderSettingsPanel() {
     else if (activeSetTab == 1) {
         DrawToggleEx(cx, cy, cw, ROW_H, 53, "Particles", settings.particles, 23); cy += ROW_H + SET_ROW_GAP;
         DrawToggleEx(cx, cy, cw, ROW_H, 54, "Stars BG", settings.starsBg, 24); cy += ROW_H + SET_ROW_GAP;
-        DrawToggleEx(cx, cy, cw, ROW_H, 55, "Beams BG", settings.beamsBg, 25); cy += ROW_H + SET_ROW_GAP;
         DrawToggleEx(cx, cy, cw, ROW_H, 56, "Sound FX", settings.soundFx, 26); cy += ROW_H + SET_ROW_GAP;
         DrawToggleEx(cx, cy, cw, ROW_H, 58, "Trail Sparkles", settings.trailSparkles, 28); cy += ROW_H + SET_ROW_GAP;
         DrawToggleEx(cx, cy, cw, ROW_H, 59, "Trail Glow", settings.trailGlow, 29); cy += ROW_H + SET_ROW_GAP;
@@ -1779,29 +1699,35 @@ void RenderSettingsPanel() {
 void RenderMenu() {
     menuItems.clear();
 
-    if (GetAsyncKeyState(VK_INSERT) & 1) {
+    static bool insertWasDown = false;
+    bool insertDown = (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0;
+    if (insertDown && !insertWasDown) {
         menuOpen = !menuOpen;
         if (!menuOpen) settingsOpen = false;
         PlayClickSound();
-        Sleep(150);
     }
-    if (GetAsyncKeyState(VK_END) & 1) { running = false; Sleep(150); }
+    insertWasDown = insertDown;
+
+    static bool endWasDown = false;
+    bool endDown = (GetAsyncKeyState(VK_END) & 0x8000) != 0;
+    if (endDown && !endWasDown) running = false;
+    endWasDown = endDown;
 
     float target = menuOpen ? 1.0f : 0.0f;
-    menuAnim += (target - menuAnim) * 0.18f;
+    menuAnim += (target - menuAnim) * 0.12f;
     if (menuAnim < 0.001f) menuAnim = 0.0f;
     if (menuAnim > 0.999f) menuAnim = 1.0f;
 
     float settingsTarget = settingsOpen ? 1.0f : 0.0f;
-    settingsAnim += (settingsTarget - settingsAnim) * 0.22f;
+    settingsAnim += (settingsTarget - settingsAnim) * 0.18f;
     if (settingsAnim < 0.001f) settingsAnim = 0.0f;
     if (settingsAnim > 0.999f) settingsAnim = 1.0f;
 
     {
         float t = (float)activeTab;
-        tabAnim += (t - tabAnim) * 0.2f;
+        tabAnim += (t - tabAnim) * 0.12f;
         float st = (float)activeSetTab;
-        setTabAnim += (st - setTabAnim) * 0.2f;
+        setTabAnim += (st - setTabAnim) * 0.12f;
     }
 
     if (menuAnim < 0.01f) return;
@@ -1816,13 +1742,13 @@ void RenderMenu() {
 
     Color3 a = GetAccent();
 
-    for (int i = 12; i >= 0; i--) {
-        float t = (12 - i) / 12.0f;
-        float hue = fmodf(hueShift * 0.5f + i * 12.0f, 360.0f);
-        Color3 glow = HSVtoRGB(hue, 0.9f, 0.6f * t * ease);
-        int r = (int)(glow.r * t * 0.35f);
-        int g = (int)(glow.g * t * 0.35f);
-        int b = (int)(glow.b * t * 0.35f);
+    float glowPulse = 0.85f + 0.15f * sinf(menuTime * 0.6f);
+    for (int i = 10; i >= 0; i--) {
+        float t = 1.0f - (float)i / 10.0f;
+        float fade = t * t * ease * glowPulse;
+        int r = (int)(a.r * fade * 0.22f);
+        int g = (int)(a.g * fade * 0.22f);
+        int b = (int)(a.b * fade * 0.22f);
         if (r < 2) r = 2;
         if (g < 2) g = 2;
         if (b < 2) b = 2;
@@ -1831,10 +1757,13 @@ void RenderMenu() {
     }
 
     DrawRoundedRect(drawX, drawY, scaledW, scaledH, 12, 0, 0, 0);
+    for (int i = 0; i < scaledH; i += 6) {
+        float t = (float)i / scaledH;
+        int shade = 4 + (int)(t * 4.0f);
+        DrawFilledRect(drawX + 1, drawY + i, scaledW - 2, 6, shade, shade - 1, shade + 3);
+    }
     DrawAuroraWaves((float)drawX, (float)drawY, scaledW, scaledH, a);
     DrawStars((float)drawX, (float)drawY, scaledW, scaledH);
-    DrawBeams((float)drawX, (float)drawY, scaledW, scaledH);
-    DrawComets((float)drawX, (float)drawY, scaledW, scaledH);
     DrawRoundedRectOutline(drawX, drawY, scaledW, scaledH, 12, a.r, a.g, a.b, 2);
     DrawAnimatedBorder(drawX, drawY, scaledW, scaledH, 12, a);
 
@@ -1859,11 +1788,8 @@ void RenderMenu() {
     int gearX = drawX + scaledW - gearSize - 14;
     int gearY = drawY + (TITLE_H - gearSize) / 2;
 
-    POINT mp;
-    GetCursorPos(&mp);
-    ScreenToClient(overlayWnd, &mp);
-    bool gearHover = (mp.x >= gearX && mp.x <= gearX + gearSize &&
-        mp.y >= gearY && mp.y <= gearY + gearSize);
+    bool gearHover = (cachedCursor.x >= gearX && cachedCursor.x <= gearX + gearSize &&
+        cachedCursor.y >= gearY && cachedCursor.y <= gearY + gearSize);
 
     DrawRoundedRect(gearX, gearY, gearSize, gearSize, 6,
         gearHover ? a.r / 3 : 12,
@@ -1928,7 +1854,6 @@ void RenderMenu() {
         int ry = startY;
         DrawToggleEx(rightX, ry, COL_W, ROW_H, 53, "Particles", settings.particles, 16); ry += ROW_H + ROW_GAP;
         DrawToggleEx(rightX, ry, COL_W, ROW_H, 54, "Stars BG", settings.starsBg, 17);    ry += ROW_H + ROW_GAP;
-        DrawToggleEx(rightX, ry, COL_W, ROW_H, 55, "Beams BG", settings.beamsBg, 18);    ry += ROW_H + ROW_GAP;
         DrawToggleEx(rightX, ry, COL_W, ROW_H, 62, "Aurora Waves", settings.auroraWaves, 19); ry += ROW_H + ROW_GAP;
         DrawToggleEx(rightX, ry, COL_W, ROW_H, 63, "Animated Border", settings.animatedBorder, 20); ry += ROW_H + ROW_GAP;
     }
@@ -1939,8 +1864,8 @@ void RenderMenu() {
 
         Color3 acc = GetAccent();
         int btnY = ly + 10;
-        bool hov = (mp.x >= leftX && mp.x <= leftX + COL_W &&
-            mp.y >= btnY && mp.y <= btnY + 34);
+        bool hov = (cachedCursor.x >= leftX && cachedCursor.x <= leftX + COL_W &&
+            cachedCursor.y >= btnY && cachedCursor.y <= btnY + 34);
         DrawRoundedRect(leftX, btnY, COL_W, 34, 8,
             hov ? 60 : 30, hov ? 30 : 15, hov ? 30 : 15);
         DrawRoundedRectOutline(leftX, btnY, COL_W, 34, 8, 255, 80, 80, 1);
@@ -2031,9 +1956,7 @@ void HandleMenuClick(int mx, int my) {
     case 52: settings.rgbMode = !settings.rgbMode; break;
     case 53: settings.particles = !settings.particles; break;
     case 54: settings.starsBg = !settings.starsBg; break;
-    case 55: settings.beamsBg = !settings.beamsBg; break;
     case 56: settings.soundFx = !settings.soundFx; break;
-    case 57: settings.cursorGlow = !settings.cursorGlow; break;
 
     case 200: activeTab = 0; PlayClickSound(); break;
     case 201: activeTab = 1; PlayClickSound(); break;
@@ -2047,6 +1970,10 @@ void HandleMenuClick(int mx, int my) {
     case 400: activeSetTab = 0; PlayClickSound(); break;
     case 401: activeSetTab = 1; PlayClickSound(); break;
     case 402: activeSetTab = 2; PlayClickSound(); break;
+
+    case 500: mapState.targetZoom -= 0.25f; if (mapState.targetZoom < 0.5f) mapState.targetZoom = 0.5f; break;
+    case 501: mapState.targetZoom += 0.25f; if (mapState.targetZoom > 4.0f) mapState.targetZoom = 4.0f; break;
+    case 502: mapState.targetZoom = 1.0f; mapState.offsetX = 0; mapState.offsetY = 0; break;
     }
 
     for (int i = 0; i < 4; i++) {
@@ -2099,12 +2026,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
         }
 
+        if (settings.radar) {
+            int rx = GetSystemMetrics(SM_CXSCREEN) - 220;
+            int ry = 10;
+            int rs = 210;
+            if (pt.x >= rx && pt.x <= rx + rs && pt.y >= ry && pt.y <= ry + rs + 26) {
+                return HTCLIENT;
+            }
+        }
+
         return HTTRANSPARENT;
     }
 
     case WM_LBUTTONDOWN: {
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
+
+        if (settings.radar) {
+            int radarX = GetSystemMetrics(SM_CXSCREEN) - 220;
+            int radarY = 10;
+            int radarSize = 210;
+            if (mx >= radarX && mx <= radarX + radarSize &&
+                my >= radarY && my <= radarY + radarSize) {
+                mapState.dragging = true;
+                mapState.dragStartX = mx - (int)mapState.offsetX;
+                mapState.dragStartY = my - (int)mapState.offsetY;
+                SetCapture(hwnd);
+                return 0;
+            }
+            if (mx >= radarX && mx <= radarX + radarSize &&
+                my >= radarY + radarSize + 4 && my <= radarY + radarSize + 22) {
+                HandleMenuClick(mx, my);
+                return 0;
+            }
+        }
 
         if (settingsOpen && menuAnim > 0.5f) {
             if (mx >= SETTINGS_X && mx <= SETTINGS_X + SET_W &&
@@ -2148,6 +2103,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
 
+        cachedCursor.x = mx;
+        cachedCursor.y = my;
+
+        if (mapState.dragging) {
+            mapState.offsetX = (float)(mx - mapState.dragStartX);
+            mapState.offsetY = (float)(my - mapState.dragStartY);
+            float maxOff = 100.0f * mapState.zoom;
+            if (mapState.offsetX > maxOff) mapState.offsetX = maxOff;
+            if (mapState.offsetX < -maxOff) mapState.offsetX = -maxOff;
+            if (mapState.offsetY > maxOff) mapState.offsetY = maxOff;
+            if (mapState.offsetY < -maxOff) mapState.offsetY = -maxOff;
+        }
+
         if (dragging) {
             MENU_X = mx - dragOffsetX;
             MENU_Y = my - dragOffsetY;
@@ -2171,6 +2139,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_LBUTTONUP: {
+        if (mapState.dragging) {
+            mapState.dragging = false;
+            ReleaseCapture();
+        }
         if (dragging) {
             dragging = false;
             ReleaseCapture();
@@ -2180,6 +2152,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             ReleaseCapture();
         }
         return 0;
+    }
+
+    case WM_MOUSEWHEEL: {
+        if (settings.radar) {
+            POINT p;
+            GetCursorPos(&p);
+            ScreenToClient(hwnd, &p);
+            int radarX = GetSystemMetrics(SM_CXSCREEN) - 220;
+            int radarY = 10;
+            int radarSize = 210;
+            if (p.x >= radarX && p.x <= radarX + radarSize &&
+                p.y >= radarY && p.y <= radarY + radarSize) {
+                int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+                mapState.targetZoom += (delta > 0) ? 0.25f : -0.25f;
+                if (mapState.targetZoom < 0.5f) mapState.targetZoom = 0.5f;
+                if (mapState.targetZoom > 4.0f) mapState.targetZoom = 4.0f;
+                return 0;
+            }
+        }
+        break;
     }
 
     case WM_DESTROY:
@@ -2209,8 +2201,6 @@ HWND CreateOverlay() {
         NULL, NULL, wc.hInstance, NULL);
 
     SetLayeredWindowAttributes(hwnd, RGB(1, 1, 1), 0, LWA_COLORKEY);
-    MARGINS margins = { -1 };
-    DwmExtendFrameIntoClientArea(hwnd, &margins);
     ShowWindow(hwnd, SW_SHOW);
     return hwnd;
 }
@@ -2246,6 +2236,18 @@ int main() {
     printf("[NULLCORE] CS2 PID: %d\n", pid);
     printf("[NULLCORE] client.dll: 0x%llX\n", clientBase);
 
+    uintptr_t testPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
+    printf("[NULLCORE] Local pawn: 0x%llX\n", testPawn);
+    if (!testPawn) {
+        printf("[WARN] Local pawn NULL - offsets outdated or not in game\n");
+    }
+    uintptr_t testList = ReadMem<uintptr_t>(clientBase + OFFSET_DW_ENTITY_LIST);
+    printf("[NULLCORE] Entity list: 0x%llX\n", testList);
+
+    LARGE_INTEGER qpcFreq, qpcLast;
+    QueryPerformanceFrequency(&qpcFreq);
+    QueryPerformanceCounter(&qpcLast);
+
     MSG msg;
     while (running) {
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
@@ -2258,17 +2260,14 @@ int main() {
         if (hueShift > 360.0f) hueShift -= 360.0f;
 
         UpdateFPS();
-        UpdateOverlayPosition();
         UpdateCursorState();
         ClearScreen();
         UpdateMouseTrail();
         UpdateParticles();
-        UpdateComets();
         UpdateHitMarkers();
         UpdateDeathMarks();
         UpdateFpsHistory();
         UpdateStars();
-        UpdateBeams();
 
         if (settings.esp || settings.radar || settings.silentAim) {
             UpdatePlayers();
@@ -2282,15 +2281,21 @@ int main() {
         DrawDeathMarks();
         RenderMenu();
         DrawMouseTrail();
-        DrawCursorGlow();
-        DrawCustomCursor();
         BunnyHop();
         TriggerBot();
         SilentAim();
 
         Present();
 
-        Sleep(10);
+        LARGE_INTEGER qpcNow;
+        QueryPerformanceCounter(&qpcNow);
+        float elapsed = (float)(qpcNow.QuadPart - qpcLast.QuadPart) / (float)qpcFreq.QuadPart;
+        if (elapsed < 0.011f) {
+            DWORD sleepMs = (DWORD)((0.011f - elapsed) * 1000.0f);
+            if (sleepMs > 5) sleepMs -= 1;
+            if (sleepMs > 0) Sleep(sleepMs);
+        }
+        qpcLast = qpcNow;
     }
 
     ShowCursor(TRUE);
