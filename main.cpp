@@ -3,6 +3,7 @@
 #include <TlHelp32.h>
 #include <cstdio>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -27,6 +28,7 @@
 #define OFFSET_M_ARMOR                    0x1EC8
 #define OFFSET_M_ID_ENT_INDEX             0x36DC
 #define OFFSET_M_ISCOPED                  0x1E98
+#define OFFSET_M_PLAYER_NAME              0x6FC
 
 HWND overlayWnd = NULL;
 HWND gameWnd = NULL;
@@ -35,6 +37,8 @@ uintptr_t clientBase = 0;
 bool running = true;
 bool menuOpen = false;
 bool settingsOpen = false;
+bool debugPrint = false;
+DWORD lastDebugTick = 0;
 
 int MENU_X = 200;
 int MENU_Y = 200;
@@ -159,16 +163,6 @@ int fpsHistoryIdx = 0;
 
 std::unordered_map<uintptr_t, int> lastHealth;
 
-struct BlackHoleParticle {
-    float angle;
-    float radius;
-    float speed;
-    float life;
-    float maxLife;
-    float size;
-};
-std::vector<BlackHoleParticle> blackHole;
-
 struct MapState {
     float zoom = 1.0f;
     float targetZoom = 1.0f;
@@ -219,12 +213,9 @@ struct Settings {
     bool particles = true;
     bool rgbMode = false;
     bool starsBg = true;
-    bool beamsBg = true;
     bool soundFx = false;
-    bool cursorGlow = true;
     bool trailSparkles = true;
     bool trailGlow = true;
-    bool menuBlur = true;
     bool auroraWaves = true;
     bool animatedBorder = true;
 
@@ -257,7 +248,7 @@ struct PlayerData {
     Vector3 headPos;
     int health;
     int armor;
-    int team;
+    uint8_t team;
     bool alive;
     bool spotted;
     float distance;
@@ -435,6 +426,7 @@ HPEN GetPenCached(int r, int g, int b, int thickness) {
 
 void DrawFilledRect(int x, int y, int w, int h, int r, int g, int b, int a = 255) {
     if (w <= 0 || h <= 0) return;
+    if (r == 1 && g == 1 && b == 1) { r = 2; g = 2; b = 2; }
     RECT rect = { x, y, x + w, y + h };
     HBRUSH brush = GetBrushCached(r, g, b);
     FillRect(memDC, &rect, brush);
@@ -835,7 +827,7 @@ void BunnyHop() {
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
 
-    int flags = ReadMem<int>(localPawn + OFFSET_M_FLAGS);
+    uint32_t flags = ReadMem<uint32_t>(localPawn + OFFSET_M_FLAGS);
     bool isOnGround = (flags & 1) != 0;
 
     if ((GetAsyncKeyState(VK_SPACE) & 0x8000) && isOnGround) {
@@ -879,8 +871,8 @@ void TriggerBot() {
     int health = ReadMem<int>(pawn + OFFSET_M_HEALTH);
     if (health <= 0) return;
 
-    int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
-    int targetTeam = ReadMem<int>(pawn + OFFSET_M_TEAM);
+    uint8_t localTeam = ReadMem<uint8_t>(localPawn + OFFSET_M_TEAM);
+    uint8_t targetTeam = ReadMem<uint8_t>(pawn + OFFSET_M_TEAM);
     if (targetTeam == localTeam) return;
 
     if (settings.triggerDelay > 0) Sleep(settings.triggerDelay);
@@ -898,7 +890,7 @@ void SilentAim() {
     if (!localPawn) return;
 
     Vector3 localPos = GetPlayerPos(localPawn);
-    int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
+    uint8_t localTeam = ReadMem<uint8_t>(localPawn + OFFSET_M_TEAM);
 
     PlayerData* target = nullptr;
     float closestFov = (float)settings.aimFov;
@@ -948,13 +940,13 @@ void UpdatePlayers() {
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
 
+    uint8_t localTeam = ReadMem<uint8_t>(localPawn + OFFSET_M_TEAM);
+    Vector3 localPos = GetPlayerPos(localPawn);
+
     for (auto it = lastHealth.begin(); it != lastHealth.end(); ) {
         if (it->second <= 0) it = lastHealth.erase(it);
         else ++it;
     }
-
-    int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
-    Vector3 localPos = GetPlayerPos(localPawn);
 
     uintptr_t entityList = ReadMem<uintptr_t>(clientBase + OFFSET_DW_ENTITY_LIST);
     if (!entityList) return;
@@ -975,13 +967,13 @@ void UpdatePlayers() {
         uintptr_t pawn = ReadMem<uintptr_t>(listEntry2 + 120 * (pawnHandle & 0x1FF));
         if (!pawn || pawn == localPawn) continue;
 
-        int lifeState = ReadMem<int>(pawn + OFFSET_M_LIFESTATE);
-        if (lifeState != 256) continue;
+        uint8_t lifeState = ReadMem<uint8_t>(pawn + OFFSET_M_LIFESTATE);
+        if (lifeState != 0) continue;
 
         int health = ReadMem<int>(pawn + OFFSET_M_HEALTH);
         if (health <= 0 || health > 100) continue;
 
-        int team = ReadMem<int>(pawn + OFFSET_M_TEAM);
+        uint8_t team = ReadMem<uint8_t>(pawn + OFFSET_M_TEAM);
 
         auto hpIt = lastHealth.find(pawn);
         if (hpIt != lastHealth.end()) {
@@ -1006,14 +998,15 @@ void UpdatePlayers() {
         player.pawn = pawn;
         player.position = GetPlayerPos(pawn);
         player.headPos = player.position;
-        player.headPos.z += 70.0f;
+        player.headPos.z += 72.0f;
         player.health = health;
         player.armor = ReadMem<int>(pawn + OFFSET_M_ARMOR);
         player.team = team;
         player.alive = true;
         player.distance = localPos.DistTo(player.position);
 
-        ReadProcessMemory(gameProcess, (LPCVOID)(playerController + 0x6FC), player.name, sizeof(player.name), NULL);
+        ReadProcessMemory(gameProcess, (LPCVOID)(playerController + OFFSET_M_PLAYER_NAME), player.name, sizeof(player.name) - 1, NULL);
+        player.name[sizeof(player.name) - 1] = 0;
 
         players.push_back(player);
     }
@@ -1044,7 +1037,7 @@ void DrawHitMarkers() {
     for (const auto& hm : hitMarkers) {
         float t = hm.life / hm.maxLife;
         int size = (int)((1.0f - t) * 18.0f + 4.0f);
-        int r = hm.isKill ? 255 : 255;
+        int r = 255;
         int g = hm.isKill ? 60 : (int)(t * 200 + 55);
         int b = hm.isKill ? 60 : (int)(t * 200 + 55);
 
@@ -1126,7 +1119,7 @@ void RenderESP() {
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
 
-    int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
+    uint8_t localTeam = ReadMem<uint8_t>(localPawn + OFFSET_M_TEAM);
 
     UpdateViewMatrix();
 
@@ -1175,7 +1168,7 @@ void RenderESP() {
             int gg = (int)(g * pulse);
             int bb = (int)(b * pulse);
 
-            DrawRect(boxX - 1, boxY - 1, boxW + 2, boxH + 2, 1, 1, 1, 1);
+            DrawRect(boxX - 1, boxY - 1, boxW + 2, boxH + 2, 2, 2, 2, 1);
             DrawRect(boxX, boxY, boxW, boxH, rr, gg, bb, 2);
         }
 
@@ -1278,7 +1271,7 @@ void DrawRadar() {
     if (!localPawn) return;
 
     Vector3 localPos = GetPlayerPos(localPawn);
-    int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
+    uint8_t localTeam = ReadMem<uint8_t>(localPawn + OFFSET_M_TEAM);
 
     Color3 e = GetEspColor();
 
@@ -1891,6 +1884,10 @@ void RenderMenu() {
     char fpsText[32];
     sprintf_s(fpsText, "%.0f FPS", fps);
     DrawText(drawX + scaledW - 64, footerY, fpsText, 130, 135, 155, 11);
+
+    char dbgBuf[128];
+    sprintf_s(dbgBuf, "Players: %d", (int)players.size());
+    DrawText(drawX + 200, footerY, dbgBuf, 130, 135, 155, 10);
 }
 
 int HitTestMenu(int mx, int my) {
@@ -2205,13 +2202,37 @@ HWND CreateOverlay() {
     return hwnd;
 }
 
+void DebugPrintState() {
+    DWORD now = GetTickCount();
+    if (now - lastDebugTick < 1000) return;
+    lastDebugTick = now;
+
+    uintptr_t lp = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
+    printf("[DBG] localPawn=0x%llX\n", (unsigned long long)lp);
+    if (lp) {
+        uintptr_t sn = ReadMem<uintptr_t>(lp + OFFSET_M_PGAMESCENENODE);
+        Vector3 pos = GetPlayerPos(lp);
+        int hp = ReadMem<int>(lp + OFFSET_M_HEALTH);
+        uint8_t team = ReadMem<uint8_t>(lp + OFFSET_M_TEAM);
+        uint32_t flags = ReadMem<uint32_t>(lp + OFFSET_M_FLAGS);
+        uint8_t ls = ReadMem<uint8_t>(lp + OFFSET_M_LIFESTATE);
+        printf("[DBG] sceneNode=0x%llX pos=(%.1f %.1f %.1f)\n",
+            (unsigned long long)sn, pos.x, pos.y, pos.z);
+        printf("[DBG] hp=%d team=%d flags=0x%X lifeState=%d\n", hp, team, flags, ls);
+    }
+    UpdateViewMatrix();
+    printf("[DBG] viewMatrix[0]=%.3f [5]=%.3f [12]=%.3f [15]=%.3f\n",
+        viewMatrix[0], viewMatrix[5], viewMatrix[12], viewMatrix[15]);
+    printf("[DBG] players.size()=%zu\n", players.size());
+}
+
 int main() {
     AllocConsole();
     FILE* f;
     freopen_s(&f, "CONOUT$", "w", stdout);
     printf("[NULLCORE] Starting...\n");
 
-    MessageBoxW(NULL, L"Click OK when CS2 is running", L"NULLCORE", MB_OK);
+    MessageBoxW(NULL, L"Click OK when CS2 is running and you are IN GAME (not menu)", L"NULLCORE", MB_OK);
 
     DWORD pid = GetProcessId(L"cs2.exe");
     if (!pid) {
@@ -2234,15 +2255,15 @@ int main() {
     lastFpsTime = GetTickCount();
 
     printf("[NULLCORE] CS2 PID: %d\n", pid);
-    printf("[NULLCORE] client.dll: 0x%llX\n", clientBase);
+    printf("[NULLCORE] client.dll: 0x%llX\n", (unsigned long long)clientBase);
 
     uintptr_t testPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
-    printf("[NULLCORE] Local pawn: 0x%llX\n", testPawn);
+    printf("[NULLCORE] Local pawn: 0x%llX\n", (unsigned long long)testPawn);
     if (!testPawn) {
-        printf("[WARN] Local pawn NULL - offsets outdated or not in game\n");
+        printf("[WARN] Local pawn NULL - offsets outdated OR not in game\n");
     }
     uintptr_t testList = ReadMem<uintptr_t>(clientBase + OFFSET_DW_ENTITY_LIST);
-    printf("[NULLCORE] Entity list: 0x%llX\n", testList);
+    printf("[NULLCORE] Entity list: 0x%llX\n", (unsigned long long)testList);
 
     LARGE_INTEGER qpcFreq, qpcLast;
     QueryPerformanceFrequency(&qpcFreq);
@@ -2271,6 +2292,10 @@ int main() {
 
         if (settings.esp || settings.radar || settings.silentAim) {
             UpdatePlayers();
+        }
+
+        if (debugPrint) {
+            DebugPrintState();
         }
 
         RenderESP();
