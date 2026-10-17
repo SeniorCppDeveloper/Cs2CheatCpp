@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <unordered_map>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -42,17 +43,17 @@ int MENU_X = 200;
 int MENU_Y = 200;
 int SETTINGS_X = 540;
 int SETTINGS_Y = 200;
-const int MENU_W = 800;
-const int MENU_H = 460;
-const int TITLE_H = 36;
+const int MENU_W = 820;
+const int MENU_H = 480;
+const int TITLE_H = 40;
 const int PAD = 14;
 const int COL_W = (MENU_W - PAD * 3) / 2;
-const int ROW_H = 30;
-const int ROW_GAP = 5;
+const int ROW_H = 32;
+const int ROW_GAP = 6;
 
-const int SET_W = 260;
-const int SET_H = 520;
-const int SET_ROW_GAP = 4;
+const int SET_W = 280;
+const int SET_H = 540;
+const int SET_ROW_GAP = 5;
 
 bool dragging = false;
 int dragOffsetX = 0;
@@ -117,9 +118,11 @@ struct Star {
 std::vector<Star> stars;
 
 struct Beam {
-    float y;
+    float x;
     float life;
+    float maxLife;
     float width;
+    float phase;
     int r, g, b;
 };
 
@@ -136,6 +139,46 @@ int screenW = 0, screenH = 0;
 struct Color3 {
     int r, g, b;
 };
+
+struct Vector3 {
+    float x, y, z;
+
+    float DistTo(const Vector3& other) const {
+        return sqrtf((other.x - x) * (other.x - x) +
+            (other.y - y) * (other.y - y) +
+            (other.z - z) * (other.z - z));
+    }
+};
+
+struct HitMarker {
+    float x, y;
+    float life;
+    float maxLife;
+    int damage;
+    bool isKill;
+};
+std::vector<HitMarker> hitMarkers;
+
+struct DeathMark {
+    Vector3 worldPos;
+    float life;
+    int r, g, b;
+};
+std::vector<DeathMark> deathMarks;
+
+float crosshairKick = 0.0f;
+
+float fpsHistory[60] = { 0 };
+int fpsHistoryIdx = 0;
+
+struct Comet {
+    float x, y, vx, vy, life, maxLife, size;
+    int r, g, b;
+};
+std::vector<Comet> comets;
+float cometSpawnTimer = 0.0f;
+
+std::unordered_map<uintptr_t, int> lastHealth;
 
 const Color3 COLOR_PALETTE[] = {
     {255, 60, 60},
@@ -176,6 +219,11 @@ struct Settings {
     bool beamsBg = true;
     bool soundFx = false;
     bool cursorGlow = true;
+    bool trailSparkles = true;
+    bool trailGlow = true;
+    bool menuBlur = true;
+    bool auroraWaves = true;
+    bool animatedBorder = true;
 
     int espColorMode = 0;
     int espColorIdx = 0;
@@ -186,9 +234,34 @@ struct Settings {
     int triggerDelay = 0;
     int aimFov = 30;
     float aimSmoothness = 5.0f;
+
+    float toggleAnim[64] = { 0 };
 };
 
 Settings settings;
+
+int activeTab = 0;
+int activeSetTab = 0;
+float tabAnim = 0.0f;
+float setTabAnim = 0.0f;
+const char* TAB_NAMES[3] = { "COMBAT", "VISUALS", "MISC" };
+const char* SET_TAB_NAMES[3] = { "COLORS", "EFFECTS", "AIM" };
+
+struct PlayerData {
+    uintptr_t controller;
+    uintptr_t pawn;
+    Vector3 position;
+    Vector3 headPos;
+    int health;
+    int armor;
+    int team;
+    bool alive;
+    bool spotted;
+    float distance;
+    char name[64];
+};
+
+std::vector<PlayerData> players;
 
 Color3 HSVtoRGB(float h, float s, float v) {
     float c = v * s;
@@ -230,32 +303,6 @@ Color3 GetEspColor() {
     }
     return COLOR_PALETTE[settings.espColorIdx];
 }
-
-struct Vector3 {
-    float x, y, z;
-
-    float DistTo(const Vector3& other) const {
-        return sqrtf((other.x - x) * (other.x - x) +
-            (other.y - y) * (other.y - y) +
-            (other.z - z) * (other.z - z));
-    }
-};
-
-struct PlayerData {
-    uintptr_t controller;
-    uintptr_t pawn;
-    Vector3 position;
-    Vector3 headPos;
-    int health;
-    int armor;
-    int team;
-    bool alive;
-    bool spotted;
-    float distance;
-    char name[64];
-};
-
-std::vector<PlayerData> players;
 
 DWORD GetProcessId(const wchar_t* name) {
     DWORD pid = 0;
@@ -356,101 +403,139 @@ void Present() {
     ReleaseDC(overlayWnd, hdc);
 }
 
+HBRUSH GetBrushCached(int r, int g, int b) {
+    static std::unordered_map<int, HBRUSH> cache;
+    COLORREF c = RGB(r, g, b);
+    auto it = cache.find((int)c);
+    if (it != cache.end()) return it->second;
+    if (cache.size() > 200) {
+        for (auto& p : cache) DeleteObject(p.second);
+        cache.clear();
+    }
+    HBRUSH hb = CreateSolidBrush(c);
+    cache[(int)c] = hb;
+    return hb;
+}
+
+HPEN GetPenCached(int r, int g, int b, int thickness) {
+    static std::unordered_map<int, HPEN> cache;
+    COLORREF c = RGB(r, g, b);
+    int key = (int)c ^ (thickness << 24);
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    if (cache.size() > 150) {
+        for (auto& p : cache) DeleteObject(p.second);
+        cache.clear();
+    }
+    HPEN hp = CreatePen(PS_SOLID, thickness, c);
+    cache[key] = hp;
+    return hp;
+}
+
 void DrawFilledRect(int x, int y, int w, int h, int r, int g, int b, int a = 255) {
+    if (w <= 0 || h <= 0) return;
     RECT rect = { x, y, x + w, y + h };
-    HBRUSH brush = CreateSolidBrush(RGB(r, g, b));
+    HBRUSH brush = GetBrushCached(r, g, b);
     FillRect(memDC, &rect, brush);
-    DeleteObject(brush);
 }
 
 void DrawRect(int x, int y, int w, int h, int r, int g, int b, int thickness = 2) {
-    HPEN pen = CreatePen(PS_SOLID, thickness, RGB(r, g, b));
+    HPEN pen = GetPenCached(r, g, b, thickness);
     HBRUSH brush = (HBRUSH)GetStockObject(NULL_BRUSH);
     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
     HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
     Rectangle(memDC, x, y, x + w, y + h);
     SelectObject(memDC, oldPen);
     SelectObject(memDC, oldBrush);
-    DeleteObject(pen);
 }
 
 void DrawLine(int x1, int y1, int x2, int y2, int r, int g, int b, int thickness = 1) {
-    HPEN pen = CreatePen(PS_SOLID, thickness, RGB(r, g, b));
+    HPEN pen = GetPenCached(r, g, b, thickness);
     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
     MoveToEx(memDC, x1, y1, NULL);
     LineTo(memDC, x2, y2);
     SelectObject(memDC, oldPen);
-    DeleteObject(pen);
+}
+
+HFONT GetCachedFont(int size) {
+    static HFONT cache[32] = { 0 };
+    if (size < 6 || size >= 32) size = 12;
+    if (!cache[size]) {
+        cache[size] = CreateFontA(size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
+    }
+    return cache[size];
 }
 
 void DrawText(int x, int y, const char* text, int r, int g, int b, int size = 12) {
     SetBkMode(memDC, TRANSPARENT);
     SetTextColor(memDC, RGB(r, g, b));
-    HFONT font = CreateFontA(size, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH, "Segoe UI");
+    HFONT font = GetCachedFont(size);
     HFONT oldFont = (HFONT)SelectObject(memDC, font);
     TextOutA(memDC, x, y, text, (int)strlen(text));
     SelectObject(memDC, oldFont);
-    DeleteObject(font);
+}
+
+void DrawTextCenter(int cx, int y, const char* text, int r, int g, int b, int size = 12) {
+    SetBkMode(memDC, TRANSPARENT);
+    SetTextColor(memDC, RGB(r, g, b));
+    HFONT font = GetCachedFont(size);
+    HFONT oldFont = (HFONT)SelectObject(memDC, font);
+    SIZE sz;
+    GetTextExtentPoint32A(memDC, text, (int)strlen(text), &sz);
+    TextOutA(memDC, cx - sz.cx / 2, y, text, (int)strlen(text));
+    SelectObject(memDC, oldFont);
 }
 
 void DrawCircle(int x, int y, int radius, int r, int g, int b) {
-    HPEN pen = CreatePen(PS_SOLID, 2, RGB(r, g, b));
-    HBRUSH brush = CreateSolidBrush(RGB(r, g, b));
+    HPEN pen = GetPenCached(r, g, b, 2);
+    HBRUSH brush = GetBrushCached(r, g, b);
     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
     HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
     Ellipse(memDC, x - radius, y - radius, x + radius, y + radius);
     SelectObject(memDC, oldPen);
     SelectObject(memDC, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(brush);
 }
 
 void DrawCircleOutline(int x, int y, int radius, int r, int g, int b, int thickness = 1) {
-    HPEN pen = CreatePen(PS_SOLID, thickness, RGB(r, g, b));
+    HPEN pen = GetPenCached(r, g, b, thickness);
     HBRUSH brush = (HBRUSH)GetStockObject(NULL_BRUSH);
     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
     HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
     Ellipse(memDC, x - radius, y - radius, x + radius, y + radius);
     SelectObject(memDC, oldPen);
     SelectObject(memDC, oldBrush);
-    DeleteObject(pen);
 }
 
 void DrawFilledCircle(int x, int y, int radius, int r, int g, int b) {
-    HBRUSH brush = CreateSolidBrush(RGB(r, g, b));
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(r, g, b));
+    HBRUSH brush = GetBrushCached(r, g, b);
+    HPEN pen = GetPenCached(r, g, b, 1);
     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
     HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
     Ellipse(memDC, x - radius, y - radius, x + radius, y + radius);
     SelectObject(memDC, oldPen);
     SelectObject(memDC, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(brush);
 }
 
 void DrawRoundedRect(int x, int y, int w, int h, int radius, int r, int g, int b) {
-    HBRUSH brush = CreateSolidBrush(RGB(r, g, b));
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(r, g, b));
+    HBRUSH brush = GetBrushCached(r, g, b);
+    HPEN pen = GetPenCached(r, g, b, 1);
     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
     HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
     RoundRect(memDC, x, y, x + w, y + h, radius, radius);
     SelectObject(memDC, oldPen);
     SelectObject(memDC, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(brush);
 }
 
 void DrawRoundedRectOutline(int x, int y, int w, int h, int radius, int r, int g, int b, int thickness = 1) {
-    HPEN pen = CreatePen(PS_SOLID, thickness, RGB(r, g, b));
+    HPEN pen = GetPenCached(r, g, b, thickness);
     HBRUSH brush = (HBRUSH)GetStockObject(NULL_BRUSH);
     HPEN oldPen = (HPEN)SelectObject(memDC, pen);
     HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
     RoundRect(memDC, x, y, x + w, y + h, radius, radius);
     SelectObject(memDC, oldPen);
     SelectObject(memDC, oldBrush);
-    DeleteObject(pen);
 }
 
 float EaseOutCubic(float t) {
@@ -491,26 +576,28 @@ void SpawnSparkle(float x, float y, int r, int g, int b) {
     Sparkle s;
     s.x = x;
     s.y = y;
-    float angle = (rand() % 360) * 3.14159f / 180.0f;
-    float speed = 1.0f + (rand() % 100) / 50.0f;
+    float angle = (float)(rand() % 360) * 3.14159f / 180.0f;
+    float speed = 1.0f + (float)(rand() % 100) / 50.0f;
     s.vx = cosf(angle) * speed;
     s.vy = sinf(angle) * speed;
-    s.maxLife = 0.6f + (rand() % 60) / 100.0f;
+    s.maxLife = 0.6f + (float)(rand() % 60) / 100.0f;
     s.life = s.maxLife;
     s.r = r;
     s.g = g;
     s.b = b;
-    s.size = 1.5f + (rand() % 20) / 10.0f;
+    s.size = 1.5f + (float)(rand() % 20) / 10.0f;
     sparkles.push_back(s);
 }
 
 void SpawnBeam(int r, int g, int b) {
-    if (beams.size() > 20) return;
+    if (beams.size() > 12) return;
 
     Beam bm;
-    bm.y = (float)(rand() % 400);
-    bm.life = 1.0f;
-    bm.width = 40.0f + (rand() % 100);
+    bm.x = (float)(rand() % 1000) / 1000.0f;
+    bm.maxLife = 4.0f + (float)(rand() % 400) / 100.0f;
+    bm.life = bm.maxLife;
+    bm.width = 20.0f + (float)(rand() % 60);
+    bm.phase = (float)(rand() % 628) / 100.0f;
     bm.r = r;
     bm.g = g;
     bm.b = b;
@@ -564,16 +651,15 @@ void UpdateBeams() {
     }
 
     for (auto& b : beams) {
-        b.y += 0.8f;
-        b.life -= 0.008f;
+        b.life -= 0.016f;
     }
 
     beams.erase(
         std::remove_if(beams.begin(), beams.end(),
-            [](const Beam& b) { return b.life <= 0.0f || b.y > 500; }),
+            [](const Beam& b) { return b.life <= 0.0f; }),
         beams.end());
 
-    if ((rand() % 100) < 3) {
+    if (beams.size() < 6 && (rand() % 100) < 2) {
         Color3 a = GetAccent();
         SpawnBeam(a.r, a.g, a.b);
     }
@@ -610,20 +696,38 @@ void DrawBeams(float anchorX, float anchorY, int w, int h) {
     if (!settings.beamsBg) return;
 
     for (const auto& b : beams) {
-        float t = b.life;
-        int by = (int)(anchorY + b.y);
+        float lifeT = b.life / b.maxLife;
+        float fade = lifeT < 0.3f ? lifeT / 0.3f : (lifeT > 0.7f ? (1.0f - lifeT) / 0.3f : 1.0f);
+        if (fade < 0.0f) fade = 0.0f;
 
-        if (by < anchorY || by > anchorY + h) continue;
+        float wobble = sinf(menuTime * 0.8f + b.phase) * 30.0f;
+        int bx = (int)(anchorX + b.x * w + wobble);
+        int bw = (int)b.width;
 
-        int r = (int)(b.r * t * 0.15f);
-        int g = (int)(b.g * t * 0.15f);
-        int bb = (int)(b.b * t * 0.15f);
+        if (bx < (int)anchorX - bw) bx = (int)anchorX - bw;
+        if (bx > (int)anchorX + w) continue;
 
-        if (r < 2) r = 2;
-        if (g < 2) g = 2;
-        if (bb < 2) bb = 2;
+        for (int row = 0; row < h; row += 4) {
+            float vt = (float)row / h;
+            float bandPulse = 0.5f + 0.5f * sinf(menuTime * 1.5f + b.phase + vt * 6.28f);
+            float a = fade * bandPulse * 0.18f;
+            if (a < 0.02f) continue;
 
-        DrawFilledRect((int)anchorX, by, w, (int)b.width, r, g, bb);
+            int r = (int)(b.r * a);
+            int g = (int)(b.g * a);
+            int bb = (int)(b.b * a);
+            if (r < 2) r = 2;
+            if (g < 2) g = 2;
+            if (bb < 2) bb = 2;
+
+            int rowX = bx + (int)(sinf(menuTime * 1.2f + b.phase + vt * 4.0f) * 6.0f);
+            if (rowX < (int)anchorX) rowX = (int)anchorX;
+            int rowW = bw;
+            if (rowX + rowW > (int)anchorX + w) rowW = (int)(anchorX + w) - rowX;
+            if (rowW <= 0) continue;
+
+            DrawFilledRect(rowX, (int)(anchorY + row), rowW, 4, r, g, bb);
+        }
     }
 }
 
@@ -700,7 +804,7 @@ void UpdateMouseTrail() {
             mouseTrail.erase(mouseTrail.begin());
         }
 
-        if (settings.particles && moveDist > 6.0f && (rand() % 100) < 25) {
+        if (settings.particles && settings.trailSparkles && moveDist > 6.0f && (rand() % 100) < 25) {
             SpawnSparkle((float)p.x, (float)p.y, c.r, c.g, c.b);
         }
     }
@@ -728,6 +832,16 @@ void DrawMouseTrail() {
         int px = (int)mouseTrail[i].x;
         int py = (int)mouseTrail[i].y;
 
+        if (settings.trailGlow && i > 0) {
+            int px2 = (int)mouseTrail[i - 1].x;
+            int py2 = (int)mouseTrail[i - 1].y;
+            int gr = tr / 4, gg = tg / 4, gb = tb / 4;
+            if (gr < 5) gr = 5;
+            if (gg < 5) gg = 5;
+            if (gb < 5) gb = 5;
+            DrawLine(px2, py2, px, py, gr, gg, gb, radius + 2);
+        }
+
         if (i > 0) {
             int px2 = (int)mouseTrail[i - 1].x;
             int py2 = (int)mouseTrail[i - 1].y;
@@ -742,45 +856,8 @@ void DrawMouseTrail() {
     }
 }
 
-void DrawCursorGlow() {
-    if (!settings.cursorGlow) return;
-    if (!menuOpen || menuAnim < 0.5f) return;
-
-    POINT p;
-    GetCursorPos(&p);
-    ScreenToClient(overlayWnd, &p);
-
-    if (p.x < MENU_X || p.x > MENU_X + MENU_W) return;
-    if (p.y < MENU_Y || p.y > MENU_Y + MENU_H) return;
-
-    Color3 a = GetAccent();
-
-    for (int i = 6; i >= 1; i--) {
-        int radius = i * 5;
-        float alpha = (6 - i) / 6.0f * 0.3f;
-        int r = (int)(a.r * alpha);
-        int g = (int)(a.g * alpha);
-        int b = (int)(a.b * alpha);
-        if (r < 2) r = 2;
-        if (g < 2) g = 2;
-        if (b < 2) b = 2;
-        DrawCircleOutline(p.x, p.y, radius, r, g, b, 2);
-    }
-}
-
-void DrawCustomCursor() {
-    if (!cursorOverMenu) return;
-
-    POINT p;
-    GetCursorPos(&p);
-    ScreenToClient(overlayWnd, &p);
-
-    Color3 a = GetAccent();
-
-    DrawFilledCircle(p.x, p.y, 5, a.r, a.g, a.b);
-    DrawFilledCircle(p.x, p.y, 2, 240, 245, 255);
-    DrawCircleOutline(p.x, p.y, 8, a.r, a.g, a.b, 1);
-}
+void DrawCursorGlow() {}
+void DrawCustomCursor() {}
 
 void DrawHealthBar(int x, int y, int w, int h, int health) {
     int barHeight = (int)(h * (health / 100.0f));
@@ -900,7 +977,7 @@ void SilentAim() {
     int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
 
     PlayerData* target = nullptr;
-    float closestFov = settings.aimFov;
+    float closestFov = (float)settings.aimFov;
 
     int sw = GetSystemMetrics(SM_CXSCREEN);
     int sh = GetSystemMetrics(SM_CYSCREEN);
@@ -912,7 +989,7 @@ void SilentAim() {
         Vector3 screenHead;
         if (!WorldToScreen(player.headPos, screenHead, sw, sh)) continue;
 
-        float fov = sqrtf(pow(screenHead.x - sw / 2, 2) + pow(screenHead.y - sh / 2, 2));
+        float fov = sqrtf(powf(screenHead.x - sw / 2, 2) + powf(screenHead.y - sh / 2, 2));
         if (fov < closestFov) {
             closestFov = fov;
             target = &player;
@@ -939,11 +1016,18 @@ void SilentAim() {
     WriteMem(clientBase + OFFSET_DW_VIEW_ANGLES, newAngles);
 }
 
+void SpawnHitMarker(int damage, bool isKill);
+
 void UpdatePlayers() {
     players.clear();
 
     uintptr_t localPawn = ReadMem<uintptr_t>(clientBase + OFFSET_DW_LOCAL_PLAYER_PAWN);
     if (!localPawn) return;
+
+    for (auto it = lastHealth.begin(); it != lastHealth.end(); ) {
+        if (it->second <= 0) it = lastHealth.erase(it);
+        else ++it;
+    }
 
     int localTeam = ReadMem<int>(localPawn + OFFSET_M_TEAM);
     Vector3 localPos = GetPlayerPos(localPawn);
@@ -959,7 +1043,7 @@ void UpdatePlayers() {
         if (!playerController) continue;
 
         uint32_t pawnHandle = ReadMem<uint32_t>(playerController + OFFSET_M_H_PLAYER_PAWN);
-        if (!pawnHandle || pawnHandle == -1) continue;
+        if (!pawnHandle || pawnHandle == (uint32_t)-1) continue;
 
         uintptr_t listEntry2 = ReadMem<uintptr_t>(entityList + (8 * ((pawnHandle & 0x7FFF) >> 9) + 16));
         if (!listEntry2) continue;
@@ -974,6 +1058,24 @@ void UpdatePlayers() {
         if (health <= 0 || health > 100) continue;
 
         int team = ReadMem<int>(pawn + OFFSET_M_TEAM);
+
+        auto hpIt = lastHealth.find(pawn);
+        if (hpIt != lastHealth.end()) {
+            int prevHp = hpIt->second;
+            if (health < prevHp && team != localTeam && prevHp > 0 && health >= 0) {
+                int dmg = prevHp - health;
+                bool isKill = (health <= 0);
+                SpawnHitMarker(dmg, isKill);
+                if (isKill) {
+                    DeathMark dm;
+                    dm.worldPos = GetPlayerPos(pawn);
+                    dm.life = 1.5f;
+                    dm.r = 255; dm.g = 60; dm.b = 60;
+                    deathMarks.push_back(dm);
+                }
+            }
+        }
+        lastHealth[pawn] = health;
 
         PlayerData player;
         player.controller = playerController;
@@ -995,6 +1097,161 @@ void UpdatePlayers() {
     std::sort(players.begin(), players.end(), [](const PlayerData& a, const PlayerData& b) {
         return a.distance < b.distance;
         });
+}
+
+void SpawnHitMarker(int damage, bool isKill) {
+    int sw = GetSystemMetrics(SM_CXSCREEN) / 2;
+    int sh = GetSystemMetrics(SM_CYSCREEN) / 2;
+    HitMarker hm;
+    hm.x = (float)sw + (float)(rand() % 20 - 10);
+    hm.y = (float)sh + (float)(rand() % 20 - 10);
+    hm.maxLife = isKill ? 1.2f : 0.7f;
+    hm.life = hm.maxLife;
+    hm.damage = damage;
+    hm.isKill = isKill;
+    hitMarkers.push_back(hm);
+}
+
+void UpdateHitMarkers() {
+    for (auto& hm : hitMarkers) hm.life -= 0.03f;
+    hitMarkers.erase(
+        std::remove_if(hitMarkers.begin(), hitMarkers.end(),
+            [](const HitMarker& h) { return h.life <= 0.0f; }),
+        hitMarkers.end());
+}
+
+void DrawHitMarkers() {
+    for (const auto& hm : hitMarkers) {
+        float t = hm.life / hm.maxLife;
+        int size = (int)((1.0f - t) * 18.0f + 4.0f);
+        int r = hm.isKill ? 255 : 255;
+        int g = hm.isKill ? 60 : (int)(t * 200 + 55);
+        int b = hm.isKill ? 60 : (int)(t * 200 + 55);
+
+        DrawLine((int)hm.x - size, (int)hm.y - size, (int)hm.x - 3, (int)hm.y - 3, r, g, b, 2);
+        DrawLine((int)hm.x + size, (int)hm.y - size, (int)hm.x + 3, (int)hm.y - 3, r, g, b, 2);
+        DrawLine((int)hm.x - size, (int)hm.y + size, (int)hm.x - 3, (int)hm.y + 3, r, g, b, 2);
+        DrawLine((int)hm.x + size, (int)hm.y + size, (int)hm.x + 3, (int)hm.y + 3, r, g, b, 2);
+
+        char dmg[16];
+        sprintf_s(dmg, "%d", hm.damage);
+        DrawTextCenter((int)hm.x, (int)hm.y + 22, dmg, r, g, b, hm.isKill ? 14 : 11);
+
+        if (hm.isKill) {
+            DrawTextCenter((int)hm.x, (int)hm.y - 32, "KILL", 255, 80, 80, 13);
+        }
+    }
+}
+
+void UpdateDeathMarks() {
+    for (auto& dm : deathMarks) dm.life -= 0.015f;
+    deathMarks.erase(
+        std::remove_if(deathMarks.begin(), deathMarks.end(),
+            [](const DeathMark& d) { return d.life <= 0.0f; }),
+        deathMarks.end());
+}
+
+void DrawDeathMarks() {
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    for (const auto& dm : deathMarks) {
+        Vector3 scr;
+        if (!WorldToScreen(dm.worldPos, scr, sw, sh)) continue;
+        float t = dm.life;
+        int sz = (int)(t * 25.0f);
+        int rr = (int)(255 * t);
+        int gg = (int)(60 * t);
+        DrawLine((int)scr.x - sz, (int)scr.y - sz, (int)scr.x + sz, (int)scr.y + sz, rr, gg, gg, 2);
+        DrawLine((int)scr.x + sz, (int)scr.y - sz, (int)scr.x - sz, (int)scr.y + sz, rr, gg, gg, 2);
+    }
+}
+
+void UpdateComets() {
+    cometSpawnTimer += 0.016f;
+    if (cometSpawnTimer > 0.4f && comets.size() < 8 && settings.beamsBg) {
+        cometSpawnTimer = 0.0f;
+        Comet c;
+        c.x = (float)(rand() % MENU_W);
+        c.y = (float)(rand() % MENU_H);
+        float ang = (float)(rand() % 360) * 3.14159f / 180.0f;
+        float sp = 0.5f + (float)(rand() % 100) / 100.0f;
+        c.vx = cosf(ang) * sp;
+        c.vy = sinf(ang) * sp * 0.4f;
+        c.maxLife = 2.5f + (float)(rand() % 20) / 10.0f;
+        c.life = c.maxLife;
+        c.size = 2.0f + (float)(rand() % 20) / 10.0f;
+        Color3 a = GetAccent();
+        c.r = a.r; c.g = a.g; c.b = a.b;
+        comets.push_back(c);
+    }
+    for (auto& c : comets) {
+        c.x += c.vx; c.y += c.vy;
+        c.life -= 0.016f;
+    }
+    comets.erase(
+        std::remove_if(comets.begin(), comets.end(),
+            [](const Comet& c) { return c.life <= 0.0f; }),
+        comets.end());
+}
+
+void DrawComets(float anchorX, float anchorY, int w, int h) {
+    if (!settings.beamsBg) return;
+    for (const auto& c : comets) {
+        float t = c.life / c.maxLife;
+        float fade = t > 0.8f ? (1.0f - t) / 0.2f : (t < 0.2f ? t / 0.2f : 1.0f);
+        int sz = (int)(c.size * fade * 3.0f);
+        if (sz < 1) continue;
+        int r = (int)(c.r * fade * 0.8f);
+        int g = (int)(c.g * fade * 0.8f);
+        int b = (int)(c.b * fade * 0.8f);
+        if (r < 8) r = 8;
+        if (g < 8) g = 8;
+        if (b < 8) b = 8;
+
+        for (int i = 1; i <= 4; i++) {
+            int tx = (int)(anchorX + c.x - c.vx * i * 3);
+            int ty = (int)(anchorY + c.y - c.vy * i * 3);
+            int tr = r / (i + 1), tg = g / (i + 1), tb = b / (i + 1);
+            if (tr < 3) tr = 3;
+            if (tg < 3) tg = 3;
+            if (tb < 3) tb = 3;
+            int ts = sz / (i + 1);
+            if (ts < 1) ts = 1;
+            DrawFilledRect(tx, ty, ts, ts, tr, tg, tb);
+        }
+        DrawFilledCircle((int)(anchorX + c.x), (int)(anchorY + c.y), sz, r, g, b);
+    }
+}
+
+void UpdateFpsHistory() {
+    static int frameCounter = 0;
+    frameCounter++;
+    if (frameCounter >= 3) {
+        frameCounter = 0;
+        fpsHistory[fpsHistoryIdx] = fps;
+        fpsHistoryIdx = (fpsHistoryIdx + 1) % 60;
+    }
+}
+
+void DrawFpsGraph(int x, int y, int w, int h, Color3 a) {
+    DrawFilledRect(x, y, w, h, 8, 8, 10);
+    DrawRect(x, y, w, h, 20, 20, 24, 1);
+    float maxF = 240.0f;
+    int prevX = -1, prevY = -1;
+    for (int i = 0; i < 60; i++) {
+        int idx = (fpsHistoryIdx + i) % 60;
+        float v = fpsHistory[idx];
+        if (v > maxF) v = maxF;
+        int px = x + i * w / 60;
+        int py = y + h - (int)(v / maxF * h);
+        if (py < y) py = y;
+        if (py > y + h) py = y + h;
+        if (prevX >= 0) {
+            int cr = (int)(a.r * 0.9f), cg = (int)(a.g * 0.9f), cb = (int)(a.b * 0.9f);
+            DrawLine(prevX, prevY, px, py, cr, cg, cb, 1);
+        }
+        prevX = px; prevY = py;
+    }
 }
 
 void RenderESP() {
@@ -1103,17 +1360,28 @@ void RenderESP() {
 
 void DrawCrosshair() {
     if (!settings.crosshair) return;
-
     int sw = GetSystemMetrics(SM_CXSCREEN);
     int sh = GetSystemMetrics(SM_CYSCREEN);
     int cx = sw / 2;
     int cy = sh / 2;
-
     Color3 a = GetAccent();
 
-    DrawLine(cx - 10, cy, cx + 10, cy, a.r, a.g, a.b, 1);
-    DrawLine(cx, cy - 10, cx, cy + 10, a.r, a.g, a.b, 1);
-    DrawCircle(cx, cy, 4, a.r, a.g, a.b);
+    if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
+        crosshairKick = 1.0f;
+    }
+    crosshairKick *= 0.85f;
+    int spread = 10 + (int)(crosshairKick * 8.0f);
+
+    int kr = (int)(a.r * (1.0f + crosshairKick * 0.5f));
+    int kg = (int)(a.g * (1.0f - crosshairKick * 0.3f));
+    int kb = (int)(a.b * (1.0f - crosshairKick * 0.3f));
+    if (kr > 255) kr = 255;
+
+    DrawLine(cx - spread, cy, cx - 3, cy, kr, kg, kb, 2);
+    DrawLine(cx + 3, cy, cx + spread, cy, kr, kg, kb, 2);
+    DrawLine(cx, cy - spread, cx, cy - 3, kr, kg, kb, 2);
+    DrawLine(cx, cy + 3, cx, cy + spread, kr, kg, kb, 2);
+    DrawFilledCircle(cx, cy, 1, kr, kg, kb);
 }
 
 void DrawRadar() {
@@ -1163,66 +1431,149 @@ void DrawRadar() {
     }
 }
 
-void DrawToggle(int x, int y, int w, int h, int id, const char* label, bool state) {
+void DrawGradientHLine(int x, int y, int w, Color3 a, Color3 b) {
+    for (int i = 0; i < w; i += 2) {
+        float t = (float)i / w;
+        int r = (int)(a.r + (b.r - a.r) * t);
+        int g = (int)(a.g + (b.g - a.g) * t);
+        int bb = (int)(a.b + (b.b - a.b) * t);
+        DrawFilledRect(x + i, y, 2, 1, r, g, bb);
+    }
+}
+
+void DrawSectionDivider(int x, int y, int w) {
+    Color3 a = GetAccent();
+    Color3 dark = { a.r / 4, a.g / 4, a.b / 4 };
+    DrawGradientHLine(x, y, w / 2, dark, a);
+    DrawGradientHLine(x + w / 2, y, w - w / 2, a, dark);
+}
+
+void DrawBadge(int x, int y, const char* txt, bool on) {
+    Color3 a = GetAccent();
+    int w = (int)strlen(txt) * 7 + 10;
+    int h = 14;
+    if (on) {
+        DrawRoundedRect(x, y, w, h, 3, a.r / 3, a.g / 3, a.b / 3);
+        DrawRoundedRectOutline(x, y, w, h, 3, a.r, a.g, a.b, 1);
+        DrawText(x + 5, y + 1, txt, a.r, a.g, a.b, 9);
+    }
+    else {
+        DrawRoundedRect(x, y, w, h, 3, 18, 18, 20);
+        DrawText(x + 5, y + 1, txt, 100, 105, 115, 9);
+    }
+}
+
+void DrawAuroraWaves(float anchorX, float anchorY, int w, int h, Color3 a) {
+    if (!settings.auroraWaves) return;
+    int baseY = (int)(anchorY + h * 0.55f);
+    for (int layer = 0; layer < 3; layer++) {
+        float phase = menuTime * (0.4f + layer * 0.15f) + layer * 2.1f;
+        float amp = 18.0f + layer * 8.0f;
+        float freq = 0.008f + layer * 0.003f;
+        float alphaMul = 0.22f - layer * 0.05f;
+
+        for (int x = 0; x < w; x += 3) {
+            float yOff = sinf(x * freq + phase) * amp
+                + sinf(x * freq * 2.3f + phase * 1.7f) * (amp * 0.4f);
+            int py = baseY + (int)yOff;
+            if (py < anchorY || py > anchorY + h) continue;
+
+            float edgeFade = 1.0f - fabsf((float)x / w - 0.5f) * 2.0f;
+            float a2 = alphaMul * edgeFade;
+            if (a2 < 0.01f) continue;
+
+            int r = (int)(a.r * a2);
+            int g = (int)(a.g * a2);
+            int b = (int)(a.b * a2);
+            if (r < 1) r = 1;
+            if (g < 1) g = 1;
+            if (b < 1) b = 1;
+            DrawFilledRect((int)anchorX + x, py, 3, 2, r, g, b);
+        }
+    }
+}
+
+void DrawAnimatedBorder(int x, int y, int w, int h, int radius, Color3 a) {
+    if (!settings.animatedBorder) return;
+    int perimeter = (w + h) * 2;
+    int count = perimeter / 6;
+    for (int i = 0; i < count; i++) {
+        float t = (float)i / count;
+        float hue = fmodf(menuTime * 60.0f + t * 360.0f, 360.0f);
+        Color3 c = HSVtoRGB(hue, 1.0f, 1.0f);
+
+        int px, py;
+        int p = i * 6;
+        if (p < w) { px = x + p; py = y; }
+        else if (p < w + h) { px = x + w; py = y + (p - w); }
+        else if (p < w * 2 + h) { px = x + w - (p - w - h); py = y + h; }
+        else { px = x; py = y + h - (p - w * 2 - h); }
+
+        DrawFilledRect(px, py, 4, 2, c.r, c.g, c.b);
+    }
+}
+
+void DrawToggleEx(int x, int y, int w, int h, int id, const char* label,
+    bool& state, int animSlot) {
     POINT p;
     GetCursorPos(&p);
     ScreenToClient(overlayWnd, &p);
     bool hover = (p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h);
 
-    Color3 a = GetAccent();
+    if (animSlot < 0) animSlot = 0;
+    if (animSlot > 63) animSlot = 63;
+    float& ta = settings.toggleAnim[animSlot];
+    float target = state ? 1.0f : 0.0f;
+    ta += (target - ta) * 0.25f;
 
-    int bg = hover ? 22 : 10;
+    Color3 a = GetAccent();
+    int bg = hover ? 20 : 10;
+    int textShift = hover ? 2 : 0;
 
     if (hover) {
         for (int i = 3; i >= 1; i--) {
-            int glowR = (int)(a.r * 0.1f);
-            int glowG = (int)(a.g * 0.1f);
-            int glowB = (int)(a.b * 0.1f);
-            DrawRoundedRect(x - i, y - i, w + i * 2, h + i * 2, 8 + i, glowR, glowG, glowB);
+            DrawRoundedRect(x - i, y - i, w + i * 2, h + i * 2, 8 + i,
+                a.r / 12, a.g / 12, a.b / 12);
         }
     }
 
-    DrawRoundedRect(x, y, w, h, 8, bg, bg, bg);
+    DrawRoundedRect(x, y, w, h, 8, bg, bg, bg + 2);
 
-    if (hover) {
+    if (hover)
         DrawRoundedRectOutline(x, y, w, h, 8, a.r, a.g, a.b, 1);
+
+    if (ta > 0.1f) {
+        int barH = (int)((h - 8) * ta);
+        DrawFilledRect(x + 2, y + (h - barH) / 2, 2, barH,
+            (int)(a.r * ta), (int)(a.g * ta), (int)(a.b * ta));
     }
 
-    DrawText(x + 14, y + (h - 14) / 2, label, 220, 225, 235, 12);
+    DrawFilledCircle(x + 14, y + h / 2, 3,
+        state ? a.r : 60, state ? a.g : 60, state ? a.b : 65);
 
-    int toggleX = x + w - 62;
-    int toggleY = y + (h - 22) / 2;
-    int toggleW = 46;
-    int toggleH = 22;
+    DrawText(x + 24 + textShift, y + (h - 14) / 2, label,
+        220, 225, 235, 12);
 
-    if (state) {
-        DrawRoundedRect(toggleX, toggleY, toggleW, toggleH, 11, a.r, a.g, a.b);
+    int tw = 42, th = 20;
+    int tx = x + w - tw - 8;
+    int ty = y + (h - th) / 2;
 
-        int knobX = toggleX + toggleW - 19;
-        HBRUSH brush = CreateSolidBrush(RGB(240, 245, 255));
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(240, 245, 255));
-        HPEN oldPen = (HPEN)SelectObject(memDC, pen);
-        HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
-        Ellipse(memDC, knobX, toggleY + 3, knobX + 16, toggleY + 19);
-        SelectObject(memDC, oldPen);
-        SelectObject(memDC, oldBrush);
-        DeleteObject(pen);
-        DeleteObject(brush);
-    }
-    else {
-        DrawRoundedRect(toggleX, toggleY, toggleW, toggleH, 11, 35, 35, 38);
+    int offR = 30, offG = 30, offB = 34;
+    int r = (int)(offR + (a.r - offR) * ta);
+    int g = (int)(offG + (a.g - offG) * ta);
+    int b = (int)(offB + (a.b - offB) * ta);
+    DrawRoundedRect(tx, ty, tw, th, th / 2, r, g, b);
 
-        int knobX = toggleX + 3;
-        HBRUSH brush = CreateSolidBrush(RGB(150, 155, 170));
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(150, 155, 170));
-        HPEN oldPen = (HPEN)SelectObject(memDC, pen);
-        HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
-        Ellipse(memDC, knobX, toggleY + 3, knobX + 16, toggleY + 19);
-        SelectObject(memDC, oldPen);
-        SelectObject(memDC, oldBrush);
-        DeleteObject(pen);
-        DeleteObject(brush);
-    }
+    int knobR = 8;
+    int knobX = (int)(tx + 3 + (tw - th) * ta);
+    int knobY = ty + (th - knobR * 2) / 2;
+    HBRUSH brush = GetBrushCached(240, 245, 255);
+    HPEN pen = GetPenCached(240, 245, 255, 1);
+    HPEN oldPen = (HPEN)SelectObject(memDC, pen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, brush);
+    Ellipse(memDC, knobX, knobY, knobX + knobR * 2, knobY + knobR * 2);
+    SelectObject(memDC, oldPen);
+    SelectObject(memDC, oldBrush);
 
     MenuItem item;
     item.rect = { x, y, x + w, y + h };
@@ -1230,38 +1581,74 @@ void DrawToggle(int x, int y, int w, int h, int id, const char* label, bool stat
     menuItems.push_back(item);
 }
 
-void DrawStepper(int x, int y, int w, int h, int idMinus, int idPlus,
-    const char* label, const char* value) {
+void DrawTabs(int x, int y, int w, const char** names, int count,
+    int& active, float& anim, int baseId) {
     Color3 a = GetAccent();
+    int tabW = w / count;
 
+    float targetAnim = (float)active;
+    anim += (targetAnim - anim) * 0.2f;
+
+    int ulX = x + (int)(anim * tabW) + 6;
+    int ulW = tabW - 12;
+    DrawFilledRect(ulX, y + 28, ulW, 2, a.r, a.g, a.b);
+    DrawFilledRect(ulX + 4, y + 29, ulW - 8, 1, a.r / 2, a.g / 2, a.b / 2);
+
+    for (int i = 0; i < count; i++) {
+        int tx = x + i * tabW;
+        bool isActive = (i == active);
+
+        POINT mp;
+        GetCursorPos(&mp);
+        ScreenToClient(overlayWnd, &mp);
+        bool hover = (mp.x >= tx && mp.x <= tx + tabW && mp.y >= y && mp.y <= y + 28);
+
+        int cr = isActive ? 230 : (hover ? 200 : 130);
+        int cg = isActive ? 235 : (hover ? 205 : 135);
+        int cb = isActive ? 245 : (hover ? 215 : 155);
+
+        DrawTextCenter(tx + tabW / 2, y + 7, names[i], cr, cg, cb, 11);
+
+        MenuItem item;
+        item.rect = { tx, y, tx + tabW, y + 28 };
+        item.id = baseId + i;
+        menuItems.push_back(item);
+    }
+}
+
+void DrawStepperEx(int x, int y, int w, int h, int idMinus, int idPlus,
+    const char* label, const char* value, float progress) {
+    Color3 a = GetAccent();
     DrawText(x + 4, y + (h - 14) / 2, label, 220, 225, 235, 12);
+
+    if (progress >= 0.0f) {
+        int pbY = y + h - 4;
+        int pbW = w - 140;
+        DrawFilledRect(x + 4, pbY, pbW, 2, 30, 30, 34);
+        DrawFilledRect(x + 4, pbY, (int)(pbW * progress), 2, a.r, a.g, a.b);
+    }
 
     POINT mp;
     GetCursorPos(&mp);
     ScreenToClient(overlayWnd, &mp);
 
     int bx = x + w - 130;
-    int bw = 32;
+    int bw = 30;
 
-    bool hoverMinus = (mp.x >= bx && mp.x <= bx + bw && mp.y >= y && mp.y <= y + h);
+    bool hM = (mp.x >= bx && mp.x <= bx + bw && mp.y >= y && mp.y <= y + h);
     DrawRoundedRect(bx, y + 2, bw, h - 4, 6,
-        hoverMinus ? a.r / 2 : 30,
-        hoverMinus ? a.g / 2 : 30,
-        hoverMinus ? a.b / 2 : 35);
-    DrawText(bx + 11, y + (h - 16) / 2, "-", 220, 220, 230, 16);
+        hM ? a.r / 2 : 28, hM ? a.g / 2 : 28, hM ? a.b / 2 : 32);
+    DrawTextCenter(bx + bw / 2, y + (h - 16) / 2, "-", 220, 220, 230, 15);
     MenuItem mi; mi.rect = { bx, y, bx + bw, y + h }; mi.id = idMinus;
     menuItems.push_back(mi);
 
-    int vx = bx + 42;
-    DrawText(vx, y + (h - 14) / 2, value, a.r, a.g, a.b, 12);
+    DrawTextCenter(bx + 58, y + (h - 14) / 2, value, a.r, a.g, a.b, 11);
 
     int px = bx + 90;
-    bool hoverPlus = (mp.x >= px && mp.x <= px + bw && mp.y >= y && mp.y <= y + h);
+    bool hP = (mp.x >= px && mp.x <= px + bw && mp.y >= y && mp.y <= y + h);
     DrawRoundedRect(px, y + 2, bw, h - 4, 6,
-        hoverPlus ? a.r / 2 : 30,
-        hoverPlus ? a.g / 2 : 30,
-        hoverPlus ? a.b / 2 : 35);
-    DrawText(px + 10, y + (h - 16) / 2, "+", 220, 220, 230, 16);
+        hP ? a.r / 2 : 28, hP ? a.g / 2 : 28, hP ? a.b / 2 : 32);
+    DrawTextCenter(px + bw / 2, y + (h - 16) / 2, "+", 220, 220, 230, 15);
     MenuItem pi; pi.rect = { px, y, px + bw, y + h }; pi.id = idPlus;
     menuItems.push_back(pi);
 }
@@ -1279,14 +1666,14 @@ void DrawColorPicker(int x, int y, int w, int h, int idLeft, int idRight,
     ScreenToClient(overlayWnd, &mp);
 
     int bx = x + w - 130;
-    int bw = 32;
+    int bw = 30;
 
     bool hoverMinus = (mp.x >= bx && mp.x <= bx + bw && mp.y >= y && mp.y <= y + h);
     DrawRoundedRect(bx, y + 2, bw, h - 4, 6,
-        hoverMinus ? a.r / 2 : 30,
-        hoverMinus ? a.g / 2 : 30,
-        hoverMinus ? a.b / 2 : 35);
-    DrawText(bx + 11, y + (h - 16) / 2, "<", 220, 220, 230, 14);
+        hoverMinus ? a.r / 2 : 28,
+        hoverMinus ? a.g / 2 : 28,
+        hoverMinus ? a.b / 2 : 32);
+    DrawTextCenter(bx + bw / 2, y + (h - 16) / 2, "<", 220, 220, 230, 13);
     MenuItem mi; mi.rect = { bx, y, bx + bw, y + h }; mi.id = idLeft;
     menuItems.push_back(mi);
 
@@ -1296,17 +1683,16 @@ void DrawColorPicker(int x, int y, int w, int h, int idLeft, int idRight,
     int px = bx + 90;
     bool hoverPlus = (mp.x >= px && mp.x <= px + bw && mp.y >= y && mp.y <= y + h);
     DrawRoundedRect(px, y + 2, bw, h - 4, 6,
-        hoverPlus ? a.r / 2 : 30,
-        hoverPlus ? a.g / 2 : 30,
-        hoverPlus ? a.b / 2 : 35);
-    DrawText(px + 11, y + (h - 16) / 2, ">", 220, 220, 230, 14);
+        hoverPlus ? a.r / 2 : 28,
+        hoverPlus ? a.g / 2 : 28,
+        hoverPlus ? a.b / 2 : 32);
+    DrawTextCenter(px + bw / 2, y + (h - 16) / 2, ">", 220, 220, 230, 13);
     MenuItem pi; pi.rect = { px, y, px + bw, y + h }; pi.id = idRight;
     menuItems.push_back(pi);
 }
 
 void RenderSettingsPanel() {
     Color3 a = GetAccent();
-
     float sa = settingsAnim;
     if (sa < 0.01f) return;
 
@@ -1320,6 +1706,7 @@ void RenderSettingsPanel() {
     }
 
     DrawRoundedRect(sx, sy, SET_W, sh, 10, 0, 0, 0);
+    DrawAuroraWaves((float)sx, (float)sy, SET_W, sh, a);
     DrawStars((float)sx, (float)sy, SET_W, sh);
     DrawBeams((float)sx, (float)sy, SET_W, sh);
     DrawRoundedRectOutline(sx, sy, SET_W, sh, 10, a.r, a.g, a.b, 2);
@@ -1329,13 +1716,11 @@ void RenderSettingsPanel() {
     DrawRoundedRect(sx, sy, SET_W, 32, 10, 15, 15, 15);
     DrawFilledRect(sx, sy + 22, SET_W, 10, 15, 15, 15);
     DrawFilledRect(sx, sy + 31, SET_W, 1, a.r, a.g, a.b);
-
     DrawText(sx + 12, sy + 8, "SETTINGS", 230, 235, 245, 13);
 
     int gearSize = 16;
     int gearX = sx + SET_W - gearSize - 10;
     int gearY = sy + (32 - gearSize) / 2;
-
     float gearRot = menuTime * 2.0f;
     for (int i = 0; i < 8; i++) {
         float ang = gearRot + i * 3.14159f / 4.0f;
@@ -1349,47 +1734,46 @@ void RenderSettingsPanel() {
     if (settingsAnim < 0.9f) return;
     if (sh < SET_H - 10) return;
 
+    int tabX = sx + 10;
+    int tabW = SET_W - 20;
+    int tabY = sy + 40;
+    DrawTabs(tabX, tabY, tabW, SET_TAB_NAMES, 3, activeSetTab, setTabAnim, 400);
+
+    DrawSectionDivider(sx + 10, tabY + 34, SET_W - 20);
+
     int cx = sx + 14;
     int cw = SET_W - 28;
-    int cy = sy + 44;
+    int cy = tabY + 46;
 
-    DrawColorPicker(cx, cy, cw, ROW_H, 40, 41, "Menu Color", settings.menuAccentIdx);
-    cy += ROW_H + SET_ROW_GAP;
-
-    DrawColorPicker(cx, cy, cw, ROW_H, 42, 43, "Trail Color", settings.trailColorIdx);
-    cy += ROW_H + SET_ROW_GAP;
-
-    DrawColorPicker(cx, cy, cw, ROW_H, 44, 45, "ESP Color", settings.espColorIdx);
-    cy += ROW_H + SET_ROW_GAP;
-
-    char fovBuf[16]; sprintf_s(fovBuf, "%d", settings.aimFov);
-    DrawStepper(cx, cy, cw, ROW_H, 46, 47, "Aim FOV", fovBuf);
-    cy += ROW_H + SET_ROW_GAP;
-
-    char smoothBuf[16]; sprintf_s(smoothBuf, "%.1f", settings.aimSmoothness);
-    DrawStepper(cx, cy, cw, ROW_H, 48, 49, "Smoothness", smoothBuf);
-    cy += ROW_H + SET_ROW_GAP;
-
-    char delayBuf[16]; sprintf_s(delayBuf, "%dms", settings.triggerDelay);
-    DrawStepper(cx, cy, cw, ROW_H, 50, 51, "Trig Delay", delayBuf);
-    cy += ROW_H + SET_ROW_GAP;
-
-    DrawToggle(cx, cy, cw, ROW_H, 52, "RGB Mode", settings.rgbMode);
-    cy += ROW_H + SET_ROW_GAP;
-
-    DrawToggle(cx, cy, cw, ROW_H, 53, "Particles", settings.particles);
-    cy += ROW_H + SET_ROW_GAP;
-
-    DrawToggle(cx, cy, cw, ROW_H, 54, "Stars BG", settings.starsBg);
-    cy += ROW_H + SET_ROW_GAP;
-
-    DrawToggle(cx, cy, cw, ROW_H, 55, "Beams BG", settings.beamsBg);
-    cy += ROW_H + SET_ROW_GAP;
-
-    DrawToggle(cx, cy, cw, ROW_H, 56, "Sound FX", settings.soundFx);
-    cy += ROW_H + SET_ROW_GAP;
-
-    DrawToggle(cx, cy, cw, ROW_H, 57, "Cursor Glow", settings.cursorGlow);
+    if (activeSetTab == 0) {
+        DrawColorPicker(cx, cy, cw, ROW_H, 40, 41, "Menu Color", settings.menuAccentIdx);
+        cy += ROW_H + SET_ROW_GAP;
+        DrawColorPicker(cx, cy, cw, ROW_H, 42, 43, "Trail Color", settings.trailColorIdx);
+        cy += ROW_H + SET_ROW_GAP;
+        DrawColorPicker(cx, cy, cw, ROW_H, 44, 45, "ESP Color", settings.espColorIdx);
+        cy += ROW_H + SET_ROW_GAP;
+        DrawToggleEx(cx, cy, cw, ROW_H, 52, "RGB Mode", settings.rgbMode, 22);
+    }
+    else if (activeSetTab == 1) {
+        DrawToggleEx(cx, cy, cw, ROW_H, 53, "Particles", settings.particles, 23); cy += ROW_H + SET_ROW_GAP;
+        DrawToggleEx(cx, cy, cw, ROW_H, 54, "Stars BG", settings.starsBg, 24); cy += ROW_H + SET_ROW_GAP;
+        DrawToggleEx(cx, cy, cw, ROW_H, 55, "Beams BG", settings.beamsBg, 25); cy += ROW_H + SET_ROW_GAP;
+        DrawToggleEx(cx, cy, cw, ROW_H, 56, "Sound FX", settings.soundFx, 26); cy += ROW_H + SET_ROW_GAP;
+        DrawToggleEx(cx, cy, cw, ROW_H, 58, "Trail Sparkles", settings.trailSparkles, 28); cy += ROW_H + SET_ROW_GAP;
+        DrawToggleEx(cx, cy, cw, ROW_H, 59, "Trail Glow", settings.trailGlow, 29); cy += ROW_H + SET_ROW_GAP;
+        DrawToggleEx(cx, cy, cw, ROW_H, 62, "Aurora Waves", settings.auroraWaves, 30); cy += ROW_H + SET_ROW_GAP;
+        DrawToggleEx(cx, cy, cw, ROW_H, 63, "Animated Border", settings.animatedBorder, 31);
+    }
+    else {
+        char fovBuf[16]; sprintf_s(fovBuf, "%d", settings.aimFov);
+        DrawStepperEx(cx, cy, cw, ROW_H, 46, 47, "Aim FOV", fovBuf, (settings.aimFov - 5) / 175.0f);
+        cy += ROW_H + SET_ROW_GAP;
+        char smoothBuf[16]; sprintf_s(smoothBuf, "%.1f", settings.aimSmoothness);
+        DrawStepperEx(cx, cy, cw, ROW_H, 48, 49, "Smoothness", smoothBuf, (settings.aimSmoothness - 1.0f) / 19.0f);
+        cy += ROW_H + SET_ROW_GAP;
+        char delayBuf[16]; sprintf_s(delayBuf, "%dms", settings.triggerDelay);
+        DrawStepperEx(cx, cy, cw, ROW_H, 50, 51, "Trig Delay", delayBuf, settings.triggerDelay / 200.0f);
+    }
 }
 
 void RenderMenu() {
@@ -1401,11 +1785,7 @@ void RenderMenu() {
         PlayClickSound();
         Sleep(150);
     }
-
-    if (GetAsyncKeyState(VK_END) & 1) {
-        running = false;
-        Sleep(150);
-    }
+    if (GetAsyncKeyState(VK_END) & 1) { running = false; Sleep(150); }
 
     float target = menuOpen ? 1.0f : 0.0f;
     menuAnim += (target - menuAnim) * 0.18f;
@@ -1417,6 +1797,13 @@ void RenderMenu() {
     if (settingsAnim < 0.001f) settingsAnim = 0.0f;
     if (settingsAnim > 0.999f) settingsAnim = 1.0f;
 
+    {
+        float t = (float)activeTab;
+        tabAnim += (t - tabAnim) * 0.2f;
+        float st = (float)activeSetTab;
+        setTabAnim += (st - setTabAnim) * 0.2f;
+    }
+
     if (menuAnim < 0.01f) return;
 
     float ease = EaseOutCubic(menuAnim);
@@ -1424,42 +1811,49 @@ void RenderMenu() {
     int scaledH = (int)(MENU_H * (0.85f + 0.15f * ease));
     int offsetX = (MENU_W - scaledW) / 2;
     int offsetY = (MENU_H - scaledH) / 2;
-
     int drawX = MENU_X + offsetX;
     int drawY = MENU_Y + offsetY;
 
     Color3 a = GetAccent();
 
-    for (int i = 10; i >= 0; i--) {
-        float t = (10 - i) / 10.0f;
-        float hue = fmodf(hueShift * 0.5f + i * 15.0f, 360.0f);
-        Color3 glow = HSVtoRGB(hue, 0.8f, 0.5f * t * ease);
-        int r = glow.r * t * 0.3f;
-        int g = glow.g * t * 0.3f;
-        int b = glow.b * t * 0.3f;
+    for (int i = 12; i >= 0; i--) {
+        float t = (12 - i) / 12.0f;
+        float hue = fmodf(hueShift * 0.5f + i * 12.0f, 360.0f);
+        Color3 glow = HSVtoRGB(hue, 0.9f, 0.6f * t * ease);
+        int r = (int)(glow.r * t * 0.35f);
+        int g = (int)(glow.g * t * 0.35f);
+        int b = (int)(glow.b * t * 0.35f);
         if (r < 2) r = 2;
         if (g < 2) g = 2;
         if (b < 2) b = 2;
-        DrawRoundedRect(drawX - i, drawY - i, scaledW + i * 2, scaledH + i * 2, 12 + i, r, g, b);
+        DrawRoundedRect(drawX - i, drawY - i, scaledW + i * 2, scaledH + i * 2,
+            12 + i, r, g, b);
     }
 
     DrawRoundedRect(drawX, drawY, scaledW, scaledH, 12, 0, 0, 0);
+    DrawAuroraWaves((float)drawX, (float)drawY, scaledW, scaledH, a);
     DrawStars((float)drawX, (float)drawY, scaledW, scaledH);
     DrawBeams((float)drawX, (float)drawY, scaledW, scaledH);
+    DrawComets((float)drawX, (float)drawY, scaledW, scaledH);
     DrawRoundedRectOutline(drawX, drawY, scaledW, scaledH, 12, a.r, a.g, a.b, 2);
+    DrawAnimatedBorder(drawX, drawY, scaledW, scaledH, 12, a);
 
     DrawRoundedRect(drawX, drawY, scaledW, TITLE_H, 12, 0, 0, 0);
     DrawFilledRect(drawX, drawY + TITLE_H - 12, scaledW, 12, 0, 0, 0);
 
-    for (int i = 0; i < scaledW; i += 3) {
+    for (int i = 0; i < scaledW; i += 2) {
         float t = (float)i / scaledW;
-        float hue = fmodf(hueShift + t * 240.0f, 360.0f);
+        float hue = fmodf(hueShift + t * 300.0f, 360.0f);
         Color3 lineC = HSVtoRGB(hue, 1.0f, 1.0f);
-        DrawFilledRect(drawX + i, drawY + TITLE_H - 2, 3, 2, lineC.r, lineC.g, lineC.b);
+        DrawFilledRect(drawX + i, drawY + TITLE_H - 2, 2, 2, lineC.r, lineC.g, lineC.b);
     }
 
-    DrawFilledCircle(drawX + 18, drawY + TITLE_H / 2, 5, a.r, a.g, a.b);
-    DrawText(drawX + 32, drawY + (TITLE_H - 16) / 2, "NULLCORE", 230, 235, 245, 14);
+    float logoPulse = 0.6f + 0.4f * sinf(menuTime * 3.0f);
+    DrawFilledCircle(drawX + 18, drawY + TITLE_H / 2, 5,
+        (int)(a.r * logoPulse), (int)(a.g * logoPulse), (int)(a.b * logoPulse));
+    DrawFilledCircle(drawX + 18, drawY + TITLE_H / 2, 2, 255, 255, 255);
+    DrawText(drawX + 32, drawY + (TITLE_H - 16) / 2, "NULLCORE", 235, 240, 250, 14);
+    DrawBadge(drawX + 118, drawY + (TITLE_H - 14) / 2, "v2.0", true);
 
     int gearSize = 24;
     int gearX = drawX + scaledW - gearSize - 14;
@@ -1476,16 +1870,13 @@ void RenderMenu() {
         gearHover ? a.g / 3 : 12,
         gearHover ? a.b / 3 : 12);
 
-    float gearRot = menuTime * 1.5f;
-    if (gearHover) gearRot = menuTime * 6.0f;
-
+    float gearRot = menuTime * (gearHover ? 6.0f : 1.5f);
     for (int i = 0; i < 8; i++) {
         float ang = gearRot + i * 3.14159f / 4.0f;
         int px = gearX + gearSize / 2 + (int)(cosf(ang) * 8);
         int py = gearY + gearSize / 2 + (int)(sinf(ang) * 8);
         DrawFilledRect(px - 1, py - 1, 3, 3, a.r, a.g, a.b);
     }
-
     DrawFilledCircle(gearX + gearSize / 2, gearY + gearSize / 2, 6, a.r, a.g, a.b);
     DrawFilledCircle(gearX + gearSize / 2, gearY + gearSize / 2, 3, 0, 0, 0);
 
@@ -1494,36 +1885,87 @@ void RenderMenu() {
     gearItem.id = 99;
     menuItems.push_back(gearItem);
 
+    int tabX = drawX + PAD;
+    int tabW = scaledW - PAD * 2;
+    int tabY = drawY + TITLE_H + 8;
+
+    DrawTabs(tabX, tabY, tabW, TAB_NAMES, 3, activeTab, tabAnim, 200);
+    DrawSectionDivider(tabX, tabY + 34, tabW);
+
     int leftX = drawX + PAD;
     int rightX = drawX + PAD * 2 + COL_W;
-    int startY = drawY + TITLE_H + PAD;
+    int startY = tabY + 46;
 
-    int ly = startY;
-    DrawToggle(leftX, ly, COL_W, ROW_H, 1, "ESP", settings.esp);                 ly += ROW_H + ROW_GAP;
-    DrawToggle(leftX, ly, COL_W, ROW_H, 2, "BunnyHop", settings.bhop);           ly += ROW_H + ROW_GAP;
-    DrawToggle(leftX, ly, COL_W, ROW_H, 3, "Box ESP", settings.box);             ly += ROW_H + ROW_GAP;
-    DrawToggle(leftX, ly, COL_W, ROW_H, 4, "Snaplines", settings.snaplines);     ly += ROW_H + ROW_GAP;
-    DrawToggle(leftX, ly, COL_W, ROW_H, 5, "Health ESP", settings.health);       ly += ROW_H + ROW_GAP;
-    DrawToggle(leftX, ly, COL_W, ROW_H, 6, "Armor ESP", settings.armor);         ly += ROW_H + ROW_GAP;
-    DrawToggle(leftX, ly, COL_W, ROW_H, 7, "Distance", settings.distance);       ly += ROW_H + ROW_GAP;
-    DrawToggle(leftX, ly, COL_W, ROW_H, 13, "Head Dot", settings.headDot);       ly += ROW_H + ROW_GAP;
-    DrawToggle(leftX, ly, COL_W, ROW_H, 14, "Name", settings.name);              ly += ROW_H + ROW_GAP;
+    if (activeTab == 0) {
+        int ly = startY;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 1, "ESP", settings.esp, 0);              ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 3, "Box ESP", settings.box, 1);          ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 4, "Snaplines", settings.snaplines, 2);  ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 5, "Health ESP", settings.health, 3);    ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 6, "Armor ESP", settings.armor, 4);      ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 13, "Head Dot", settings.headDot, 5);    ly += ROW_H + ROW_GAP;
 
-    int ry = startY;
-    DrawToggle(rightX, ry, COL_W, ROW_H, 8, "TriggerBot", settings.triggerbot);  ry += ROW_H + ROW_GAP;
-    DrawToggle(rightX, ry, COL_W, ROW_H, 9, "Silent Aim", settings.silentAim);   ry += ROW_H + ROW_GAP;
-    DrawToggle(rightX, ry, COL_W, ROW_H, 10, "Radar", settings.radar);           ry += ROW_H + ROW_GAP;
-    DrawToggle(rightX, ry, COL_W, ROW_H, 11, "Crosshair", settings.crosshair);   ry += ROW_H + ROW_GAP;
-    DrawToggle(rightX, ry, COL_W, ROW_H, 12, "Mouse Trail", settings.mouseTrail); ry += ROW_H + ROW_GAP;
+        int ry = startY;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 8, "TriggerBot", settings.triggerbot, 6); ry += ROW_H + ROW_GAP;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 9, "Silent Aim", settings.silentAim, 7); ry += ROW_H + ROW_GAP;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 11, "Crosshair", settings.crosshair, 8); ry += ROW_H + ROW_GAP;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 10, "Radar", settings.radar, 9);         ry += ROW_H + ROW_GAP;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 2, "BunnyHop", settings.bhop, 10);       ry += ROW_H + ROW_GAP;
 
-    RenderSettingsPanel();
+        char aimBuf[64];
+        sprintf_s(aimBuf, "FOV %d  |  Smooth %.1f  |  Delay %dms",
+            settings.aimFov, settings.aimSmoothness, settings.triggerDelay);
+        DrawText(rightX + 4, ry + 6, aimBuf, 130, 135, 155, 10);
+    }
+    else if (activeTab == 1) {
+        int ly = startY;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 14, "Name", settings.name, 11);           ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 7, "Distance", settings.distance, 12);     ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 12, "Mouse Trail", settings.mouseTrail, 13); ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 60, "Trail Sparkles", settings.trailSparkles, 14); ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 61, "Trail Glow", settings.trailGlow, 15); ly += ROW_H + ROW_GAP;
+
+        int ry = startY;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 53, "Particles", settings.particles, 16); ry += ROW_H + ROW_GAP;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 54, "Stars BG", settings.starsBg, 17);    ry += ROW_H + ROW_GAP;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 55, "Beams BG", settings.beamsBg, 18);    ry += ROW_H + ROW_GAP;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 62, "Aurora Waves", settings.auroraWaves, 19); ry += ROW_H + ROW_GAP;
+        DrawToggleEx(rightX, ry, COL_W, ROW_H, 63, "Animated Border", settings.animatedBorder, 20); ry += ROW_H + ROW_GAP;
+    }
+    else {
+        int ly = startY;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 56, "Sound FX", settings.soundFx, 21);     ly += ROW_H + ROW_GAP;
+        DrawToggleEx(leftX, ly, COL_W, ROW_H, 52, "RGB Mode", settings.rgbMode, 22);     ly += ROW_H + ROW_GAP;
+
+        Color3 acc = GetAccent();
+        int btnY = ly + 10;
+        bool hov = (mp.x >= leftX && mp.x <= leftX + COL_W &&
+            mp.y >= btnY && mp.y <= btnY + 34);
+        DrawRoundedRect(leftX, btnY, COL_W, 34, 8,
+            hov ? 60 : 30, hov ? 30 : 15, hov ? 30 : 15);
+        DrawRoundedRectOutline(leftX, btnY, COL_W, 34, 8, 255, 80, 80, 1);
+        DrawTextCenter(leftX + COL_W / 2, btnY + 9, "RESET SETTINGS", 255, 120, 120, 12);
+        MenuItem rb; rb.rect = { leftX, btnY, leftX + COL_W, btnY + 34 }; rb.id = 300;
+        menuItems.push_back(rb);
+
+        int infoY = btnY + 50;
+        DrawRoundedRect(leftX, infoY, COL_W, 90, 8, 12, 12, 14);
+        DrawRoundedRectOutline(leftX, infoY, COL_W, 90, 8, acc.r / 2, acc.g / 2, acc.b / 2, 1);
+        DrawText(leftX + 10, infoY + 8, "NULLCORE v2.0", 220, 225, 235, 12);
+        DrawText(leftX + 10, infoY + 26, "INSERT - toggle menu", 130, 135, 155, 10);
+        DrawText(leftX + 10, infoY + 40, "END - exit", 130, 135, 155, 10);
+        DrawText(leftX + 10, infoY + 54, "Drag title to move", 130, 135, 155, 10);
+        DrawText(leftX + 10, infoY + 68, "Gear = settings", 130, 135, 155, 10);
+    }
 
     int footerY = drawY + scaledH - 22;
+    DrawSectionDivider(drawX + PAD, footerY - 4, scaledW - PAD * 2);
     DrawText(drawX + 16, footerY, "INSERT - close", 130, 135, 155, 11);
 
+    DrawFpsGraph(drawX + scaledW - 130, footerY - 2, 60, 14, a);
     char fpsText[32];
     sprintf_s(fpsText, "%.0f FPS", fps);
-    DrawText(drawX + scaledW - 100, footerY, fpsText, 130, 135, 155, 11);
+    DrawText(drawX + scaledW - 64, footerY, fpsText, 130, 135, 155, 11);
 }
 
 int HitTestMenu(int mx, int my) {
@@ -1562,6 +2004,11 @@ void HandleMenuClick(int mx, int my) {
     case 13: settings.headDot = !settings.headDot; break;
     case 14: settings.name = !settings.name; break;
 
+    case 60: settings.trailSparkles = !settings.trailSparkles; break;
+    case 61: settings.trailGlow = !settings.trailGlow; break;
+    case 62: settings.auroraWaves = !settings.auroraWaves; break;
+    case 63: settings.animatedBorder = !settings.animatedBorder; break;
+
     case 99:
         settingsOpen = !settingsOpen;
         PlayClickSound();
@@ -1587,6 +2034,19 @@ void HandleMenuClick(int mx, int my) {
     case 55: settings.beamsBg = !settings.beamsBg; break;
     case 56: settings.soundFx = !settings.soundFx; break;
     case 57: settings.cursorGlow = !settings.cursorGlow; break;
+
+    case 200: activeTab = 0; PlayClickSound(); break;
+    case 201: activeTab = 1; PlayClickSound(); break;
+    case 202: activeTab = 2; PlayClickSound(); break;
+
+    case 300:
+        settings = Settings();
+        PlayClickSound();
+        break;
+
+    case 400: activeSetTab = 0; PlayClickSound(); break;
+    case 401: activeSetTab = 1; PlayClickSound(); break;
+    case 402: activeSetTab = 2; PlayClickSound(); break;
     }
 
     for (int i = 0; i < 4; i++) {
@@ -1803,6 +2263,10 @@ int main() {
         ClearScreen();
         UpdateMouseTrail();
         UpdateParticles();
+        UpdateComets();
+        UpdateHitMarkers();
+        UpdateDeathMarks();
+        UpdateFpsHistory();
         UpdateStars();
         UpdateBeams();
 
@@ -1814,6 +2278,8 @@ int main() {
         DrawRadar();
         DrawCrosshair();
         DrawParticles();
+        DrawHitMarkers();
+        DrawDeathMarks();
         RenderMenu();
         DrawMouseTrail();
         DrawCursorGlow();
