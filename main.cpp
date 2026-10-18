@@ -37,7 +37,7 @@ uintptr_t clientBase = 0;
 bool running = true;
 bool menuOpen = false;
 bool settingsOpen = false;
-bool debugPrint = false;
+bool debugPrint = true;
 DWORD lastDebugTick = 0;
 
 int MENU_X = 200;
