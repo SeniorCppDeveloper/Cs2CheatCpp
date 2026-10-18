@@ -22,7 +22,7 @@
 #define OFFSET_M_TEAM                     0x3E7
 #define OFFSET_M_FLAGS                    0x3F4
 #define OFFSET_M_VEC_VELOCITY             0x430
-#define OFFSET_M_H_PLAYER_PAWN            0x92C
+#define OFFSET_M_H_PLAYER_PAWN            0x824
 #define OFFSET_M_PGAMESCENENODE           0x330
 #define OFFSET_M_VEC_ORIGIN_IN_SCENENODE  0x80
 #define OFFSET_M_ARMOR                    0x1EC8
@@ -37,7 +37,7 @@ uintptr_t clientBase = 0;
 bool running = true;
 bool menuOpen = false;
 bool settingsOpen = false;
-bool debugPrint = true;
+bool debugPrint = false;
 DWORD lastDebugTick = 0;
 
 int MENU_X = 200;
@@ -862,7 +862,7 @@ void TriggerBot() {
     uint32_t pawnHandle = ReadMem<uint32_t>(playerController + OFFSET_M_H_PLAYER_PAWN);
     if (!pawnHandle) return;
 
-    uintptr_t listEntry2 = ReadMem<uintptr_t>(entityList + (8 * ((pawnHandle & 0x7FFF) >> 9) + 16));
+    uintptr_t listEntry2 = ReadMem<uintptr_t>(entityList + ((8 * (pawnHandle & 0x7FFF)) >> 9) + 16);
     if (!listEntry2) return;
 
     uintptr_t pawn = ReadMem<uintptr_t>(listEntry2 + 120 * (pawnHandle & 0x1FF));
@@ -956,12 +956,12 @@ void UpdatePlayers() {
         if (!listEntry) continue;
 
         uintptr_t playerController = ReadMem<uintptr_t>(listEntry + 120 * (i & 0x1FF));
-        if (!playerController) continue;
+        if (!playerController || playerController < 0x10000 || playerController > 0x7FFFFFFFFFFF) continue;
 
         uint32_t pawnHandle = ReadMem<uint32_t>(playerController + OFFSET_M_H_PLAYER_PAWN);
         if (!pawnHandle || pawnHandle == (uint32_t)-1) continue;
 
-        uintptr_t listEntry2 = ReadMem<uintptr_t>(entityList + (8 * ((pawnHandle & 0x7FFF) >> 9) + 16));
+        uintptr_t listEntry2 = ReadMem<uintptr_t>(entityList + ((8 * (pawnHandle & 0x7FFF)) >> 9) + 16);
         if (!listEntry2) continue;
 
         uintptr_t pawn = ReadMem<uintptr_t>(listEntry2 + 120 * (pawnHandle & 0x1FF));
