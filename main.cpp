@@ -22,7 +22,7 @@
 #define OFFSET_M_TEAM                     0x3E7
 #define OFFSET_M_FLAGS                    0x3F4
 #define OFFSET_M_VEC_VELOCITY             0x430
-#define OFFSET_M_H_PLAYER_PAWN            0x824
+#define OFFSET_M_H_PLAYER_PAWN            0x8E8
 #define OFFSET_M_PGAMESCENENODE           0x330
 #define OFFSET_M_VEC_ORIGIN_IN_SCENENODE  0x80
 #define OFFSET_M_ARMOR                    0x1EC8
