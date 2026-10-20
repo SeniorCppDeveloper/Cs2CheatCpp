@@ -2272,7 +2272,13 @@ int main() {
     MSG msg;
     while (running) {
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
 
+        menuTime += 0.016f;
+        hueShift += 2.0f;
+        if (hueShift > 360.0f) hueShift -= 360.0f;
 
         UpdateFPS();
         UpdateCursorState();
