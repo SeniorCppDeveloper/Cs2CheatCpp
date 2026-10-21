@@ -285,23 +285,17 @@ Color3 HSVtoRGB(float h, float s, float v) {
 }
 
 Color3 GetAccent() {
-    if (settings.rgbMode) {
+    if (settings.rgbMode && settingsOpen) {
         return HSVtoRGB(fmodf(hueShift, 360.0f), 1.0f, 1.0f);
     }
-    return COLOR_PALETTE[settings.menuAccentIdx];
+    return { 220, 220, 230 };
 }
 
 Color3 GetTrailColor() {
-    if (settings.rgbMode) {
-        return HSVtoRGB(fmodf(hueShift + 60.0f, 360.0f), 1.0f, 1.0f);
-    }
     return COLOR_PALETTE[settings.trailColorIdx];
 }
 
 Color3 GetEspColor() {
-    if (settings.rgbMode) {
-        return HSVtoRGB(fmodf(hueShift + 180.0f, 360.0f), 1.0f, 1.0f);
-    }
     return COLOR_PALETTE[settings.espColorIdx];
 }
 
@@ -637,6 +631,8 @@ void UpdateStars() {
 
 void DrawStars(float anchorX, float anchorY, int w, int h) {
     if (!settings.starsBg) return;
+    if (!settings.rgbMode) return;
+
     Color3 a = GetAccent();
 
     for (const auto& s : stars) {
@@ -1372,6 +1368,8 @@ void DrawBadge(int x, int y, const char* txt, bool on) {
 
 void DrawAuroraWaves(float anchorX, float anchorY, int w, int h, Color3 a) {
     if (!settings.auroraWaves) return;
+    if (!settings.rgbMode) return;
+
     int baseY = (int)(anchorY + h * 0.6f);
 
     for (int layer = 0; layer < 2; layer++) {
@@ -1406,6 +1404,12 @@ void DrawAuroraWaves(float anchorX, float anchorY, int w, int h, Color3 a) {
 
 void DrawAnimatedBorder(int x, int y, int w, int h, int radius, Color3 a) {
     if (!settings.animatedBorder) return;
+
+    if (!settings.rgbMode) {
+        DrawRoundedRectOutline(x, y, w, h, radius, a.r, a.g, a.b, 2);
+        return;
+    }
+
     int perimeter = (w + h) * 2;
     int count = perimeter / 6;
     for (int i = 0; i < count; i++) {
@@ -1763,11 +1767,16 @@ void RenderMenu() {
     DrawRoundedRect(drawX, drawY, scaledW, TITLE_H, 12, 0, 0, 0);
     DrawFilledRect(drawX, drawY + TITLE_H - 12, scaledW, 12, 0, 0, 0);
 
-    for (int i = 0; i < scaledW; i += 2) {
-        float t = (float)i / scaledW;
-        float hue = fmodf(hueShift + t * 300.0f, 360.0f);
-        Color3 lineC = HSVtoRGB(hue, 1.0f, 1.0f);
-        DrawFilledRect(drawX + i, drawY + TITLE_H - 2, 2, 2, lineC.r, lineC.g, lineC.b);
+    if (settings.rgbMode) {
+        for (int i = 0; i < scaledW; i += 2) {
+            float t = (float)i / scaledW;
+            float hue = fmodf(hueShift + t * 300.0f, 360.0f);
+            Color3 lineC = HSVtoRGB(hue, 1.0f, 1.0f);
+            DrawFilledRect(drawX + i, drawY + TITLE_H - 2, 2, 2, lineC.r, lineC.g, lineC.b);
+        }
+    }
+    else {
+        DrawFilledRect(drawX, drawY + TITLE_H - 2, scaledW, 2, a.r, a.g, a.b);
     }
 
     float logoPulse = 0.6f + 0.4f * sinf(menuTime * 3.0f);
