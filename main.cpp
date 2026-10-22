@@ -9,13 +9,13 @@
 #include <algorithm>
 #include <unordered_map>
 
-#define OFFSET_DW_ENTITY_LIST             0x271A908
-#define OFFSET_DW_VIEW_MATRIX             0x256B020
-#define OFFSET_DW_LOCAL_PLAYER_PAWN       0x2565718
-#define OFFSET_DW_LOCAL_PLAYER_CONTROLLER 0x253CB78
-#define OFFSET_DW_VIEW_ANGLES             0x257BCC8
-#define OFFSET_DW_CSGO_INPUT              0x257B640
-#define OFFSET_DW_GLOBAL_VARS             0x2230090
+#define OFFSET_DW_ENTITY_LIST             0x2717828
+#define OFFSET_DW_VIEW_MATRIX             0x2567FA0
+#define OFFSET_DW_LOCAL_PLAYER_PAWN       0x2562808
+#define OFFSET_DW_LOCAL_PLAYER_CONTROLLER 0x253A068
+#define OFFSET_DW_VIEW_ANGLES             0x25787E8
+#define OFFSET_DW_CSGO_INPUT              0x2578160
+#define OFFSET_DW_GLOBAL_VARS             0x222DE98
 
 #define OFFSET_M_HEALTH                   0x34C
 #define OFFSET_M_LIFESTATE                0x354
